@@ -1,0 +1,1478 @@
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEWS.HTML  —  Expense Management System  (Redesigned)
+//
+// Architecture decisions:
+//   • EXPENSE_CATALOG      — Head → SubHead taxonomy (3 domains + custom)
+//   • UnifiedModal         — single <v-dialog> system, size varies per mode
+//   • ExpenseLineEditor    — inline multi-row add (appends to list on Add)
+//   • PrintHelper          — window.print() with injected print-only styles
+//   • FileValidator        — 5 MB per file, 20 MB total, 2 PDF max
+//   • OverflowManager-safe — JSON fields always go through store; no direct
+//                            cell writes from frontend
+//
+// Views:  LoginView · DashboardView · ExpensesView · TicketsView
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ── EXPENSE HEAD/SUBHEAD CATALOG ────────────────────────────────────────────
+const EXPENSE_CATALOG = {
+  // ── Mobilization ──────────────────────────────────────────────────────────
+  'Mobilization': {
+    icon: 'mdi-truck-delivery-outline',
+    subHeads: ['Transportation', 'Fuel & Vehicle', 'Equipment Hiring', 'Labour Mobilization',
+               'Logistics & Freight', 'Loading / Unloading', 'Food & Meals (Travel)',
+               'Accommodation (Travel)', 'Custom / Other'],
+  },
+  // ── Admin Cost ────────────────────────────────────────────────────────────
+  'Admin Cost': {
+    icon: 'mdi-office-building-outline',
+    subHeads: ['Office Rent', 'Utilities', 'Stationery & Supplies', 'Printing & Photocopying',
+               'Communication (Phone/Internet)', 'Software & Subscriptions',
+               'Postage & Courier', 'Miscellaneous Admin', 'Custom / Other'],
+  },
+  // ── Training ──────────────────────────────────────────────────────────────
+  'Training': {
+    icon: 'mdi-school-outline',
+    subHeads: ['Trainer Fees', 'Training Materials', 'Venue & Arrangement', 'Participant Travel',
+               'Participant Accommodation', 'Refreshments', 'Certification Fees', 'Custom / Other'],
+  },
+  // ── Expenses Center ───────────────────────────────────────────────────────
+  'Expenses Center': {
+    icon: 'mdi-receipt-text-outline',
+    subHeads: ['Medical & Health', 'Safety & PPE', 'Repairs & Maintenance', 'Fuel (Ops)',
+               'Entertainment & Client', 'Marketing & Promotion', 'Legal & Professional',
+               'Taxes & Duties', 'Custom / Other'],
+  },
+  // ── Custom ────────────────────────────────────────────────────────────────
+  'Custom': {
+    icon: 'mdi-tag-plus-outline',
+    subHeads: ['Custom / Other'],
+  },
+};
+
+const EXPENSE_HEADS = Object.keys(EXPENSE_CATALOG);
+
+function subHeadsFor(head) {
+  return (EXPENSE_CATALOG[head] || EXPENSE_CATALOG['Custom']).subHeads;
+}
+
+
+// ── FILE VALIDATOR ──────────────────────────────────────────────────────────
+const FILE_LIMITS = { perFile: 5 * 1024 * 1024, total: 20 * 1024 * 1024, maxFiles: 2 };
+
+function validateFiles(existing, incoming) {
+  // Returns { valid, errors, accepted }
+  const errors = [];
+  const accepted = [];
+  const allAfter = [...existing, ...incoming];
+
+  if (allAfter.length > FILE_LIMITS.maxFiles) {
+    errors.push(`Maximum ${FILE_LIMITS.maxFiles} PDF files allowed.`);
+    return { valid: false, errors, accepted };
+  }
+  let totalBytes = existing.reduce((s, f) => s + f.size, 0);
+  for (const f of incoming) {
+    if (f.type !== 'application/pdf') { errors.push(`"${f.name}" is not a PDF.`); continue; }
+    if (f.size > FILE_LIMITS.perFile)  { errors.push(`"${f.name}" exceeds 5 MB limit.`); continue; }
+    totalBytes += f.size;
+    if (totalBytes > FILE_LIMITS.total) { errors.push('Total attachment size exceeds 20 MB.'); break; }
+    accepted.push(f);
+  }
+  return { valid: errors.length === 0, errors, accepted };
+}
+
+
+// ── PRINT HELPER ────────────────────────────────────────────────────────────
+function printExpense(expense) {
+  const fmt = v => (v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  const date = d => d ? new Date(d).toLocaleDateString('en-IN') : '—';
+
+  const items = (expense.items || []).map(it => `
+    <tr>
+      <td>${it.head || '—'}</td>
+      <td>${it.subHead || '—'}</td>
+      <td>${it.description || ''}</td>
+      <td style="text-align:right">₹${fmt(it.amount)}</td>
+    </tr>`).join('');
+
+  // Generate approval history timeline
+  const approvalHistory = (expense.historyJSON || []).map(h => `
+    <tr>
+      <td>${h.action || '—'}</td>
+      <td>${h.name || '—'}</td>
+      <td>${date(h.timestamp)}</td>
+      <td>${h.note || '—'}</td>
+    </tr>`).join('');
+
+  // Generate bank details for ADVANCE expenses
+  const bankDetails = expense.bankDetails && expense.expenseType === 'ADVANCE' ? `
+  <div class="section">
+    <h3>Bank Details</h3>
+    <div class="grid bank-grid">
+      <div><div class="label">Account Name</div><div class="val">${expense.bankDetails.accountName || '—'}</div></div>
+      <div><div class="label">Account Number</div><div class="val">${expense.bankDetails.accountNumber || '—'}</div></div>
+      <div><div class="label">IFSC Code</div><div class="val">${expense.bankDetails.ifsc || '—'}</div></div>
+      <div><div class="label">Bank Name</div><div class="val">${expense.bankDetails.bankName || '—'}</div></div>
+    </div>
+  </div>` : '';
+
+  const html = `<!DOCTYPE html><html><head><title>Expense ${expense.referenceNumber}</title>
+  <style>
+    body{font-family:Arial,sans-serif;font-size:12px;color:#111;margin:24px}
+    .header{display:flex;align-items:center;margin-bottom:20px;border-bottom:2px solid #333;padding-bottom:10px}
+    .logo{height:50px;margin-right:20px}
+    .header-text{flex:1}
+    h1{font-size:18px;margin:0 0 4px}
+    .subtitle{color:#555;margin:0 0 20px}
+    .section{margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid #eee}
+    .section h3{font-size:14px;margin:0 0 12px;color:#333;text-transform:uppercase;letter-spacing:.05em}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;margin-bottom:16px}
+    .bank-grid{grid-template-columns:1fr 1fr 1fr 1fr}
+    .label{color:#666;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+    .val{font-weight:600;margin-top:2px}
+    table{width:100%;border-collapse:collapse;margin-bottom:16px}
+    th{background:#f0f0f0;padding:6px 8px;text-align:left;font-size:11px;border:1px solid #ddd}
+    td{padding:5px 8px;border:1px solid #ddd;font-size:11px}
+    .total{text-align:right;font-weight:700;font-size:13px;padding:8px}
+    .remarks{background:#fff8e1;border:1px solid #ffe082;padding:8px 12px;border-radius:4px;margin-top:12px}
+    .footer{margin-top:32px;display:flex;justify-content:space-between}
+    .sig-box{border-top:1px solid #aaa;padding-top:4px;width:180px;text-align:center;font-size:10px;color:#555}
+    @media print{
+      body{margin:12px}
+      .header{border-bottom-color:#000}
+    }
+  </style></head><body>
+  <div class="header">
+    <img src="https://i.ibb.co/5gjs4xhq/Untitled-design-15.png" alt="Company Logo" class="logo">
+    <div class="header-text">
+      <h1>Expense Management System</h1>
+      <p class="subtitle">Expense Request — ${expense.referenceNumber}</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Basic Information</h3>
+    <div class="grid">
+      <div><div class="label">Employee</div><div class="val">${expense.employeeName || '—'}</div></div>
+      <div><div class="label">Project</div><div class="val">${expense.projectCode || '—'}</div></div>
+      <div><div class="label">Expense Date</div><div class="val">${date(expense.expenseDate)}</div></div>
+      <div><div class="label">Submitted On</div><div class="val">${date(expense.createdAt)}</div></div>
+      <div><div class="label">Status</div><div class="val">${expense.expenseStatus || '—'}</div></div>
+      <div><div class="label">Stage</div><div class="val">${expense.currentStage || '—'}</div></div>
+      <div><div class="label">Expense Type</div><div class="val">${expense.expenseType || '—'}</div></div>
+      ${expense.approvedByName ? `<div><div class="label">Approved By</div><div class="val">${expense.approvedByName}</div></div>` : ''}
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Financial Details</h3>
+    <div class="grid">
+      <div><div class="label">Total Amount</div><div class="val">₹${fmt(expense.totalAmount)}</div></div>
+      ${expense.totalApprovedAmount ? `<div><div class="label">Approved Amount</div><div class="val">₹${fmt(expense.totalApprovedAmount)}</div></div>` : ''}
+      ${expense.totalPaidAmount ? `<div><div class="label">Paid Amount</div><div class="val">₹${fmt(expense.totalPaidAmount)}</div></div>` : ''}
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Expense Items</h3>
+    <table>
+      <thead><tr><th>Head</th><th>Sub-Head</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead>
+      <tbody>${items}</tbody>
+      <tfoot><tr><td colspan="3" class="total">Total</td><td class="total">₹${fmt(expense.totalAmount)}</td></tr></tfoot>
+    </table>
+  </div>
+
+  ${bankDetails}
+
+  ${expense.historyJSON && expense.historyJSON.length ? `
+  <div class="section">
+    <h3>Approval History</h3>
+    <table>
+      <thead><tr><th>Action</th><th>By</th><th>Date</th><th>Notes</th></tr></thead>
+      <tbody>${approvalHistory}</tbody>
+    </table>
+  </div>` : ''}
+
+  ${expense.description ? `
+  <div class="section">
+    <h3>Description</h3>
+    <div class="remarks">${expense.description}</div>
+  </div>` : ''}
+
+  ${expense.remarks ? `<div class="remarks"><strong>Remarks:</strong> ${expense.remarks}</div>` : ''}
+
+  <div class="footer">
+    <div class="sig-box">Submitted by<br><strong>${expense.employeeName || '—'}</strong></div>
+    <div class="sig-box">Approved by</div>
+    <div class="sig-box">Accounts</div>
+  </div>
+  </body></html>`;
+
+  const win = window.open('', '_blank');
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  setTimeout(() => { win.print(); }, 400);
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. TICKETS VIEW
+// ═══════════════════════════════════════════════════════════════════════════
+const TicketsView = {
+  name: 'TicketsView',
+  setup() {
+    const store = useStore();
+    const router = useRouter();
+    const { smAndDown } = useDisplay();
+
+    const userRole  = computed(() => store.getters['auth/userRole']);
+    const canProcessPayments = computed(() => store.getters['auth/canProcessPayments']);
+    const currentUserId = computed(() => store.getters['auth/userID']);
+
+    const allTickets  = computed(() => store.getters['tickets/all'] || []);
+    const isLoading   = computed(() => store.getters['tickets/isLoading']);
+
+    // ─── Tabs ─────────────────────────────────────────────────────────
+    const activeTab = ref('all');
+
+    // Tab-specific ticket counts
+    const awaitingBillTickets = computed(() =>
+      allTickets.value.filter(t => t.ticketStatus === 'BILLED')
+    );
+    const paymentPendingTickets = computed(() =>
+      allTickets.value.filter(t => ['CREATED', 'PAYMENT_PARTIAL'].includes(t.ticketStatus))
+    );
+    const completedTickets = computed(() =>
+      allTickets.value.filter(t => ['CLOSED', 'FORCE_CLOSED', 'REIMBURSED_CLOSED', 'SETTLED'].includes(t.ticketStatus))
+    );
+
+    // ─── Filters ──────────────────────────────────────────────────────
+    const filterStatus = ref('');
+    const filterSearch = ref('');
+    const filterDateFrom = ref('');
+    const filterDateTo = ref('');
+    const filterProject = ref('');
+    const filterQuick = ref('');
+
+    // Get unique projects for filter dropdown
+    const projectList = computed(() => {
+      const projects = new Set(allTickets.value.map(t => t.projectCode).filter(Boolean));
+      return Array.from(projects).sort();
+    });
+
+    // Export to CSV
+    const exportToCSV = () => {
+      const data = filteredTickets.value.map(t => ({
+        'Ticket #': t.ticketNumber || '',
+        'Ref #': t.referenceNumber || '',
+        'Employee': t.employeeName || '',
+        'Project': t.projectCode || '',
+        'Expense Type': t.expenseType || '',
+        'Amount': t.amount || 0,
+        'Paid': t.paidAmount || 0,
+        'Remaining': (t.amount || 0) - (t.paidAmount || 0),
+        'Status': t.ticketStatus || '',
+        'Created': fd(t.createdAt),
+      }));
+      
+      const headers = Object.keys(data[0] || {});
+      const csvContent = [
+        headers.join(','),
+        ...data.map(row => headers.map(h => `"${row[h]}"`).join(','))
+      ].join('\n');
+      
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `tickets_export_${new Date().toISOString().split('T')[0]}.csv`;
+      link.click();
+    };
+
+    const filteredTickets = computed(() => {
+      let list = allTickets.value;
+      
+      // Apply tab-based filtering
+      if (activeTab.value === 'awaitingBill') {
+        list = list.filter(t => t.ticketStatus === 'BILLED');
+      } else if (activeTab.value === 'paymentPending') {
+        list = list.filter(t => ['CREATED', 'PAYMENT_PARTIAL'].includes(t.ticketStatus));
+      } else if (activeTab.value === 'completed') {
+        list = list.filter(t => ['CLOSED', 'FORCE_CLOSED', 'REIMBURSED_CLOSED', 'SETTLED'].includes(t.ticketStatus));
+      }
+      
+      // Apply quick filters
+      if (filterQuick.value === 'partial') {
+        list = list.filter(t => t.ticketStatus === 'PAYMENT_PARTIAL');
+      } else if (filterQuick.value === 'full') {
+        list = list.filter(t => ['PAYMENT_FULL', 'BILLED'].includes(t.ticketStatus));
+      }
+      
+      // Apply other filters
+      if (filterStatus.value) list = list.filter(t => t.ticketStatus === filterStatus.value);
+      if (filterProject.value) list = list.filter(t => t.projectCode === filterProject.value);
+      if (filterSearch.value) {
+        const q = filterSearch.value.toLowerCase();
+        list = list.filter(t =>
+          (t.ticketNumber||'').toLowerCase().includes(q) ||
+          (t.employeeName||'').toLowerCase().includes(q) ||
+          (t.referenceNumber||'').toLowerCase().includes(q)
+        );
+      }
+      // Date range filter
+      if (filterDateFrom.value) {
+        const from = new Date(filterDateFrom.value);
+        list = list.filter(t => new Date(t.createdAt) >= from);
+      }
+      if (filterDateTo.value) {
+        const to = new Date(filterDateTo.value);
+        to.setHours(23, 59, 59);
+        list = list.filter(t => new Date(t.createdAt) <= to);
+      }
+      return list;
+    });
+
+    const getStatusColor = s => {
+      const l = (s||'').toLowerCase();
+      if (['billed','closed'].includes(l))              return 'success';
+      if (['created','payment_partial'].includes(l))    return 'warning';
+      if (['payment_full'].includes(l))                 return 'info';
+      if (['bill_rejected','force_closed'].includes(l)) return 'error';
+      return 'secondary';
+    };
+    const fd = d => d ? new Date(d).toLocaleDateString('en-IN') : '—';
+
+    const headers = [
+      { title: 'Ticket #',   key: 'ticketNumber',  width: '150px' },
+      { title: 'Ref #',      key: 'referenceNumber',width: '150px' },
+      { title: 'Employee',   key: 'employeeName',  width: '150px' },
+      { title: 'Expense Date', key: 'expenseDate',     width: '110px' },
+      { title: 'Bill Date',    key: 'billSubmittedAt', width: '110px' },
+      { title: 'Amount',     key: 'amount',        width: '110px', align: 'end' },
+      { title: 'Paid',       key: 'paidAmount',    width: '110px', align: 'end' },
+      { title: 'Status',     key: 'ticketStatus',  width: '130px' },
+      { title: 'Type',       key: 'expenseType',   width: '100px' },
+      { title: 'Date',       key: 'createdAt',     width: '100px' },
+      { title: '',           key: 'actions',       sortable: false, width: '80px', align: 'end' },
+    ];
+
+    // ── Detail ─────────────────────────────────────────────────────────────
+    const showDetail    = ref(false);
+    const detailLoading = ref(false);
+    const selectedTicket= ref(null);
+
+    const openDetail = async (t) => {
+      showDetail.value    = true;
+      selectedTicket.value= t;
+      if (!t.paymentJSON || !t.billJSON) {
+        detailLoading.value = true;
+        try {
+          const full = await store.dispatch('tickets/fetchTicket', t.ticketNumber);
+          selectedTicket.value = full;
+        } catch (e) {
+          console.warn('Could not refresh ticket data:', e.message);
+        } finally {
+          detailLoading.value = false;
+        }
+      }
+    };
+    const closeDetail = () => { showDetail.value = false; selectedTicket.value = null; };
+
+    // ── Payment ────────────────────────────────────────────────────────────
+    const showPayment    = ref(false);
+    const paymentLoading = ref(false);
+    const paymentForm    = ref({ amount: null, paymentMode: 'NEFT', transactionRef: '', paymentDate: '', notes: '' });
+
+    const openPaymentDialog = () => {
+      paymentForm.value = { amount: null, paymentMode: 'NEFT', transactionRef: '', paymentDate: new Date().toISOString().split('T')[0], notes: '' };
+      showPayment.value = true;
+    };
+
+    const submitPayment = async () => {
+      if (!paymentForm.value.amount || paymentForm.value.amount <= 0) {
+        store.dispatch('ui/showSnackbar', { message: 'Enter a valid payment amount.', color: 'warning' });
+        return;
+      }
+      paymentLoading.value = true;
+      try {
+        await store.dispatch('tickets/processPayment', {
+          ticketNumber:   selectedTicket.value.ticketNumber,
+          amount:         paymentForm.value.amount,
+          paymentMode:    paymentForm.value.paymentMode,
+          transactionRef: paymentForm.value.transactionRef,
+          paymentDate:    paymentForm.value.paymentDate,
+          billDate:       paymentForm.value.billDate,
+          notes:          paymentForm.value.notes,
+        });
+        showPayment.value = false;
+        const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+        selectedTicket.value = full;
+      } catch (e) { /* shown by store */ }
+      finally { paymentLoading.value = false; }
+    };
+
+    // ── Bill Submission ────────────────────────────────────────────────────
+    const showBill     = ref(false);
+    const billLoading  = ref(false);
+    const billFiles    = ref([]);  // File[]
+    const billErrors   = ref([]);
+    const billCourier  = ref({ number: '', type: '' });
+    const billItems    = ref([]);  // optional structured bills
+    const pendingBillItem = ref({ head: '', subHead: '', description: '', amount: null, customSubHead: '' });
+    watch(() => pendingBillItem.value.head, () => { pendingBillItem.value.subHead = ''; });
+    const billSubHeads   = computed(() => subHeadsFor(pendingBillItem.value.head));
+    const billItemIsCustom = computed(() => pendingBillItem.value.subHead === 'Custom / Other' || pendingBillItem.value.head === 'Custom');
+
+    const openBillDialog = () => {
+      billFiles.value  = [];
+      billErrors.value = [];
+      billItems.value  = [];
+      billCourier.value= { number: '', type: '' };
+      pendingBillItem.value = { head: '', subHead: '', description: '', amount: null, customSubHead: '' };
+      showBill.value   = true;
+    };
+
+    // Bill Verification Actions
+    const showBillApproval = ref(false);
+    const showBillCorrections = ref(false);
+    const showBillRejection = ref(false);
+    const billActionLoading = ref(false);
+    const billApprovalNotes = ref('');
+    const billCorrectionNotes = ref('');
+    const billRejectionReason = ref('');
+
+    const openBillApprovalDialog = () => {
+      billApprovalNotes.value = '';
+      showBillApproval.value = true;
+    };
+
+    const openBillCorrectionsDialog = () => {
+      billCorrectionNotes.value = '';
+      showBillCorrections.value = true;
+    };
+
+    const openBillRejectionDialog = () => {
+      billRejectionReason.value = '';
+      showBillRejection.value = true;
+    };
+
+    const submitBillApproval = async () => {
+      billActionLoading.value = true;
+      try {
+        await store.dispatch('tickets/approveBills', {
+          ticketNumber: selectedTicket.value.ticketNumber,
+          verificationNotes: billApprovalNotes.value
+        });
+        showBillApproval.value = false;
+        const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+        selectedTicket.value = full;
+      } catch (e) { /* shown by store */ }
+      finally { billActionLoading.value = false; }
+    };
+
+    const submitBillCorrections = async () => {
+      if (!billCorrectionNotes.value.trim()) {
+        store.dispatch('ui/showSnackbar', { 
+          message: 'Please provide correction notes.', 
+          color: 'warning' 
+        });
+        return;
+      }
+      billActionLoading.value = true;
+      try {
+        await store.dispatch('tickets/requestBillCorrections', {
+          ticketNumber: selectedTicket.value.ticketNumber,
+          corrections: billCorrectionNotes.value
+        });
+        showBillCorrections.value = false;
+        const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+        selectedTicket.value = full;
+      } catch (e) { /* shown by store */ }
+      finally { billActionLoading.value = false; }
+    };
+
+    const submitBillRejection = async () => {
+      if (!billRejectionReason.value.trim()) {
+        store.dispatch('ui/showSnackbar', { 
+          message: 'Please provide rejection reason.', 
+          color: 'warning' 
+        });
+        return;
+      }
+      billActionLoading.value = true;
+      try {
+        await store.dispatch('tickets/rejectBills', {
+          ticketNumber: selectedTicket.value.ticketNumber,
+          rejectionReason: billRejectionReason.value
+        });
+        showBillRejection.value = false;
+        const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+        selectedTicket.value = full;
+      } catch (e) { /* shown by store */ }
+      finally { billActionLoading.value = false; }
+    };
+
+    // Handlers that open the modals
+    const handleApproveBills = (ticketNumber) => {
+      openBillApprovalDialog();
+    };
+
+    const handleRejectBills = (ticketNumber) => {
+      openBillRejectionDialog();
+    };
+
+    const handleRequestCorrections = (ticketNumber) => {
+      openBillCorrectionsDialog();
+    };
+
+    const handleFileInput = (event) => {
+      const incoming = Array.from(event.target.files || []);
+      const result   = validateFiles(billFiles.value, incoming);
+      billErrors.value = result.errors;
+      billFiles.value  = [...billFiles.value, ...result.accepted];
+      event.target.value = '';
+    };
+
+    const removeBillFile = (i) => billFiles.value.splice(i, 1);
+
+    const appendBillItem = () => {
+      const it = pendingBillItem.value;
+      if (!it.head || !(it.amount > 0)) {
+        store.dispatch('ui/showSnackbar', { message: 'Head and amount required.', color: 'warning' });
+        return;
+      }
+      billItems.value.push({
+        head: it.head,
+        subHead: billItemIsCustom.value ? (it.customSubHead || 'Custom') : it.subHead,
+        description: it.description,
+        amount: parseFloat(it.amount),
+      });
+      pendingBillItem.value = { head: '', subHead: '', description: '', amount: null, customSubHead: '' };
+    };
+
+    const submitBill = async () => {
+      billLoading.value = true;
+      try {
+        // Convert files to base64 for GAS transmission
+        const attachments = await Promise.all(billFiles.value.map(f => new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload  = () => res({ name: f.name, size: f.size, type: f.type, data: r.result.split(',')[1] });
+          r.onerror = rej;
+          r.readAsDataURL(f);
+        })));
+
+        await store.dispatch('tickets/submitBills', {
+          ticketNumber:  selectedTicket.value.ticketNumber,
+          billItems:     billItems.value,
+          courierNumber: billCourier.value.number,
+          courierType:   billCourier.value.type,
+          attachments,
+        });
+        showBill.value = false;
+        const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+        selectedTicket.value = full;
+      } catch (e) { /* shown by store */ }
+      finally { billLoading.value = false; }
+    };
+
+    onMounted(async () => {
+      if (!allTickets.value.length) await store.dispatch('tickets/fetchTickets').catch(()=>{});
+    });
+
+    return {
+      smAndDown, canProcessPayments, currentUserId,
+      allTickets, filteredTickets, isLoading,
+      activeTab, awaitingBillTickets, paymentPendingTickets, completedTickets,
+      filterStatus, filterSearch, filterDateFrom, filterDateTo, filterProject, filterQuick,
+      projectList, exportToCSV,
+      headers, getStatusColor, fd,
+      showDetail, detailLoading, selectedTicket, openDetail, closeDetail,
+      showPayment, paymentLoading, paymentForm, openPaymentDialog, submitPayment,
+      showBill, billLoading, billFiles, billErrors, billCourier, billItems, pendingBillItem,
+      billSubHeads, billItemIsCustom, EXPENSE_HEADS,
+      openBillDialog, handleFileInput, removeBillFile, appendBillItem, submitBill,
+      handleApproveBills, handleRejectBills, handleRequestCorrections,
+      showBillApproval, showBillCorrections, showBillRejection,
+      billActionLoading, billApprovalNotes, billCorrectionNotes, billRejectionReason,
+      openBillApprovalDialog, openBillCorrectionsDialog, openBillRejectionDialog,
+      submitBillApproval, submitBillCorrections, submitBillRejection,
+    };
+  },
+
+  template: `
+  <div class="page-fade">
+    <v-container fluid class="pa-4 pa-md-6" :class="{ 'px-3': smAndDown }">
+
+      <div class="d-flex align-center mb-4">
+        <div>
+          <h1 class="text-h5 font-weight-bold mb-0">Tickets</h1>
+          <p class="text-body-2 text-medium-emphasis mb-0">Payment & billing management</p>
+        </div>
+        <v-spacer />
+        <v-btn variant="outlined" size="small" class="mr-2" prepend-icon="mdi-download"
+          @click="exportToCSV" :disabled="!filteredTickets.length">
+          Export CSV
+        </v-btn>
+      </div>
+
+      <!-- Quick Filter Chips -->
+      <div class="d-flex flex-wrap gap-2 mb-3">
+        <v-chip 
+          :color="filterQuick === '' ? 'primary' : 'default'" 
+          :variant="filterQuick === '' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = ''">
+          All
+        </v-chip>
+        <v-chip 
+          :color="filterQuick === 'partial' ? 'orange' : 'default'"
+          :variant="filterQuick === 'partial' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = 'partial'">
+          Partial Payment
+        </v-chip>
+        <v-chip 
+          :color="filterQuick === 'full' ? 'success' : 'default'"
+          :variant="filterQuick === 'full' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = 'full'">
+          Full Payment
+        </v-chip>
+      </div>
+
+      <!-- Filters -->
+      <v-card rounded="lg" elevation="0" border class="mb-4 pa-3">
+        <v-row dense align="center">
+          <v-col cols="12" sm="3">
+            <v-text-field v-model="filterSearch" placeholder="Search ticket / ref / name..."
+              density="compact" variant="outlined" hide-details prepend-inner-icon="mdi-magnify" clearable />
+          </v-col>
+          <v-col cols="6" sm="2">
+            <v-select v-model="filterStatus"
+              :items="['','CREATED','PAYMENT_PARTIAL','PAYMENT_FULL','BILLED','SETTLED','CLOSED','FORCE_CLOSED']"
+              label="Status" density="compact" variant="outlined" hide-details clearable />
+          </v-col>
+          <v-col cols="6" sm="2">
+            <v-select v-model="filterProject"
+              :items="projectList"
+              label="Project" density="compact" variant="outlined" hide-details clearable />
+          </v-col>
+          <v-col cols="6" sm="2">
+            <v-text-field v-model="filterDateFrom" type="date" label="From Date"
+              density="compact" variant="outlined" hide-details clearable />
+          </v-col>
+          <v-col cols="6" sm="2">
+            <v-text-field v-model="filterDateTo" type="date" label="To Date"
+              density="compact" variant="outlined" hide-details clearable />
+          </v-col>
+          <v-col cols="12" sm="1">
+            <v-btn variant="text" size="small" @click="filterSearch=''; filterStatus=''; filterProject=''; filterDateFrom=''; filterDateTo=''; filterQuick=''" title="Clear filters">
+              <v-icon>mdi-filter-remove</v-icon>
+            </v-btn>
+          </v-col>
+        </v-row>
+      </v-card>
+
+      <!-- 3-Tab Structure -->
+      <v-tabs v-model="activeTab" color="primary" density="compact" class="mb-3">
+        <v-tab value="all">
+          <v-icon size="16" start>mdi-format-list-bulleted</v-icon>
+          All Tickets
+        </v-tab>
+        <v-tab value="paymentPending">
+          <v-icon size="16" start>mdi-clock-outline</v-icon>
+          Payment Pending
+          <v-chip size="x-small" color="warning" variant="tonal" class="ml-1">{{ paymentPendingTickets.length }}</v-chip>
+        </v-tab>
+        <v-tab value="awaitingBill">
+          <v-icon size="16" start>mdi-file-document-outline</v-icon>
+          Awaiting Bill
+          <v-chip size="x-small" color="info" variant="tonal" class="ml-1">{{ awaitingBillTickets.length }}</v-chip>
+        </v-tab>
+        <v-tab value="completed">
+          <v-icon size="16" start>mdi-check-circle-outline</v-icon>
+          Completed
+          <v-chip size="x-small" color="success" variant="tonal" class="ml-1">{{ completedTickets.length }}</v-chip>
+        </v-tab>
+      </v-tabs>
+
+      <!-- Desktop table / Mobile card view -->
+      <v-card v-if="!smAndDown" rounded="lg" elevation="0" border>
+        <v-data-table
+          :headers="headers" :items="filteredTickets" :loading="isLoading"
+          density="compact" hover>
+          <template #item.expenseDate="{ item }">
+            <span class="text-caption">{{ fd(item.expenseDate || item.createdAt) }}</span>
+          </template>
+          <template #item.billSubmittedAt="{ item }">
+            <span class="text-caption">
+              {{ fd(item.billSubmittedAt
+                 || item.billJSON?.billSubmissions?.at(-1)?.submittedAt) }}
+            </span>
+          </template>
+          <template #item.amount="{ item }">
+            <span class="font-weight-medium">₹{{ (item.amount||0).toLocaleString('en-IN') }}</span>
+          </template>
+          <template #item.paidAmount="{ item }">
+            <span class="text-success font-weight-medium">₹{{ (item.paidAmount||0).toLocaleString('en-IN') }}</span>
+          </template>
+          <template #item.ticketStatus="{ item }">
+            <v-chip size="x-small" :color="getStatusColor(item.ticketStatus)" variant="tonal" label>{{ $utils.statusLabel(item.ticketStatus) }}</v-chip>
+          </template>
+          <template #item.expenseType="{ item }">
+            <v-chip 
+              size="x-small" 
+              :color="item.expenseType === 'ADVANCE' ? 'blue' : 'green'" 
+              variant="tonal" 
+              label
+              :prepend-icon="item.expenseType === 'ADVANCE' ? 'mdi-cash-plus' : 'mdi-receipt-text-outline'">
+              {{ item.expenseType }}
+            </v-chip>
+          </template>
+          <template #item.createdAt="{ item }">
+            <span class="text-caption">{{ fd(item.createdAt) }}</span>
+          </template>
+          <template #item.actions="{ item }">
+            <v-btn icon size="x-small" variant="text" @click="openDetail(item)">
+              <v-icon size="16">mdi-eye-outline</v-icon>
+            </v-btn>
+          </template>
+        </v-data-table>
+      </v-card>
+
+      <div v-else class="pa-2">
+        <div v-if="isLoading" class="text-center pa-8">
+          <v-progress-circular indeterminate color="primary"/>
+        </div>
+        <template v-else>
+          <div v-if="!filteredTickets.length" class="text-center pa-8 text-medium-emphasis">
+            <v-icon size="40" class="mb-2">mdi-ticket-outline</v-icon>
+            <div class="text-body-2">No tickets found</div>
+          </div>
+          <v-card v-for="item in filteredTickets" :key="item.ticketId"
+            flat border rounded="xl" class="mb-2 pa-3 cursor-pointer"
+            @click="openDetail(item)">
+            <div class="d-flex align-center justify-space-between mb-1">
+              <span class="text-caption font-weight-bold" style="font-family:monospace">
+                {{ item.ticketNumber }}
+              </span>
+              <v-chip :color="getStatusColor(item.ticketStatus)"
+                size="x-small" variant="tonal" label>
+                {{ $utils.statusLabel(item.ticketStatus) }}
+              </v-chip>
+            </div>
+            <div class="d-flex align-center justify-space-between">
+              <span class="text-body-2 text-medium-emphasis">{{ item.employeeName }}</span>
+              <span class="text-body-1 font-weight-bold">
+                ₹{{ (item.amount||0).toLocaleString('en-IN') }}
+              </span>
+            </div>
+            <div class="d-flex align-center gap-2 mt-1">
+              <v-chip size="x-small" 
+                :color="item.expenseType === 'ADVANCE' ? 'blue' : 'green'" 
+                variant="tonal" label>
+                {{ item.expenseType }}
+              </v-chip>
+              <span class="text-caption text-medium-emphasis">{{ fd(item.expenseDate || item.createdAt) }}</span>
+              <v-chip v-if="item.paidAmount" size="x-small" color="success" variant="tonal" label>
+                ₹{{ (item.paidAmount||0).toLocaleString('en-IN') }}
+              </v-chip>
+            </div>
+          </v-card>
+        </template>
+      </div>
+    </v-container>
+
+
+    <!-- ════════════════════════════════════════════════════════ -->
+    <!-- TICKET DETAIL MODAL                                      -->
+    <!-- ════════════════════════════════════════════════════════ -->
+    <ticket-detail-modal
+      v-model="showDetail"
+      :ticket="selectedTicket"
+      :loading="detailLoading"
+      :can-process-payments="canProcessPayments"
+      :is-owner="selectedTicket?.userId === currentUserId"
+      @close="closeDetail"
+      @process-payment="openPaymentDialog"
+      @submit-bills="openBillDialog"
+      @approve-bills="handleApproveBills"
+      @reject-bills="handleRejectBills"
+      @request-corrections="handleRequestCorrections"
+    />
+
+
+    <!-- ════════════════════════════════════════════════════════ -->
+    <!-- PAYMENT MODAL  (small)                                   -->
+    <!-- ════════════════════════════════════════════════════════ -->
+    <v-dialog v-model="showPayment" max-width="480" scrollable class="bottom-sheet">
+      <v-card rounded="xl">
+        <v-toolbar density="compact" color="success" class="px-2">
+          <v-icon class="mr-2">mdi-cash-plus</v-icon>
+          <v-toolbar-title class="text-body-1 font-weight-bold">Process Payment</v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showPayment = false"><v-icon>mdi-close</v-icon></v-btn>
+        </v-toolbar>
+        <v-card-text class="pa-4">
+          <v-row dense>
+            <v-col cols="12">
+              <v-text-field v-model.number="paymentForm.amount"
+                label="Amount (₹) *" type="number" density="compact" variant="outlined" prefix="₹" />
+            </v-col>
+            <v-col cols="12">
+              <v-select v-model="paymentForm.paymentMode"
+                :items="['CASH','CHEQUE','NEFT','UPI','OTHER']"
+                label="Payment Mode *" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12">
+              <v-text-field v-model="paymentForm.transactionRef"
+                label="Transaction Reference" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12">
+              <v-text-field v-model="paymentForm.paymentDate"
+                label="Payment Date" type="date" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12">
+              <v-textarea v-model="paymentForm.notes"
+                label="Remarks" density="compact" variant="outlined" rows="2" auto-grow />
+            </v-col>
+          </v-row>
+        </v-card-text>
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showPayment = false">Cancel</v-btn>
+          <v-btn color="success" variant="flat" size="small" rounded="lg"
+            :loading="paymentLoading" prepend-icon="mdi-check" @click="submitPayment">
+            Submit Payment
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+
+    <!-- ════════════════════════════════════════════════════════ -->
+    <!-- BILL SUBMISSION MODAL  (large)                           -->
+    <!-- ════════════════════════════════════════════════════════ -->
+    <v-dialog v-model="showBill" max-width="720" scrollable persistent class="bottom-sheet">
+      <v-card rounded="xl">
+        <v-toolbar density="compact" color="surface" flat border="b" class="px-2">
+          <span class="text-caption text-medium-emphasis">
+            Submit Bills
+          </span>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showBill = false"><v-icon>mdi-close</v-icon></v-btn>
+        </v-toolbar>
+        <v-card-text class="pa-4" style="max-height:78vh;overflow-y:auto">
+
+          <!-- Courier -->
+          <div class="section-label mt-4 mb-3">COURIER / DISPATCH INFO</div>
+          <v-row dense class="mb-3">
+            <v-col cols="12" sm="6">
+              <v-text-field v-model="billCourier.number"
+                label="Courier / AWB Number" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-select v-model="billCourier.type"
+                :items="['Blue Dart','DTDC','FedEx','Delhivery','Speed Post','Hand Delivery','Other']"
+                label="Courier Type" density="compact" variant="outlined" clearable />
+            </v-col>
+          </v-row>
+
+          <!-- Bill Items -->
+          <div class="section-label mt-4 mb-3">BILL BREAKDOWN (optional)</div>
+          <v-card rounded="lg" elevation="0" border class="pa-3 mb-3 bg-surface-variant">
+            <div class="text-caption text-medium-emphasis mb-2 font-weight-bold">ADD BILL ITEM</div>
+            <v-row dense>
+              <v-col cols="12" sm="4">
+                <v-select v-model="pendingBillItem.head"
+                  :items="EXPENSE_HEADS" label="Head" density="compact" variant="outlined" />
+              </v-col>
+              <v-col cols="12" sm="4">
+                <v-select v-model="pendingBillItem.subHead"
+                  :items="billSubHeads" label="Sub-Head" density="compact" variant="outlined"
+                  :disabled="!pendingBillItem.head" />
+              </v-col>
+              <v-col cols="12" sm="4">
+                <v-text-field v-model.number="pendingBillItem.amount"
+                  label="Amount (₹)" type="number" density="compact" variant="outlined" prefix="₹" />
+              </v-col>
+              <v-col cols="12" sm="8">
+                <v-text-field v-if="billItemIsCustom" v-model="pendingBillItem.customSubHead"
+                  label="Custom Sub-Head" density="compact" variant="outlined" class="mb-2" />
+                <v-text-field v-model="pendingBillItem.description"
+                  label="Description" density="compact" variant="outlined" />
+              </v-col>
+              <v-col cols="12" sm="4" class="d-flex align-end">
+                <v-btn color="info" variant="tonal" rounded="lg" size="small" block
+                  @click="appendBillItem" prepend-icon="mdi-plus">Add</v-btn>
+              </v-col>
+            </v-row>
+          </v-card>
+
+          <v-table v-if="billItems.length" density="compact" class="rounded-lg border mb-3">
+            <thead>
+              <tr>
+                <th class="text-caption">#</th>
+                <th class="text-caption">Head</th>
+                <th class="text-caption">Sub-Head</th>
+                <th class="text-caption">Description</th>
+                <th class="text-right text-caption">Amount</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(it, i) in billItems" :key="i">
+                <td class="text-caption text-medium-emphasis">{{ i+1 }}</td>
+                <td><v-chip size="x-small" color="info" variant="tonal">{{ it.head }}</v-chip></td>
+                <td class="text-caption">{{ it.subHead || '—' }}</td>
+                <td class="text-caption text-medium-emphasis">{{ it.description || '—' }}</td>
+                <td class="text-right text-body-2 font-weight-medium">₹{{ it.amount.toLocaleString('en-IN') }}</td>
+                <td><v-btn icon size="x-small" variant="text" color="error" @click="billItems.splice(i,1)"><v-icon size="14">mdi-delete-outline</v-icon></v-btn></td>
+              </tr>
+            </tbody>
+          </v-table>
+
+          <!-- PDF Attachments -->
+          <div class="section-label mt-4 mb-3">PDF ATTACHMENTS</div>
+          <v-alert v-if="billErrors.length" type="error" variant="tonal" density="compact" class="mb-2">
+            <div v-for="e in billErrors" :key="e">{{ e }}</div>
+          </v-alert>
+
+          <div class="bill-upload-zone mb-3" @click="$refs.fileInput.click()">
+            <v-icon size="32" color="grey">mdi-file-pdf-box</v-icon>
+            <div class="text-body-2 mt-1">Click to attach PDF bills</div>
+            <div class="text-caption text-medium-emphasis">Max 2 files · 5 MB each · 20 MB total</div>
+            <input ref="fileInput" type="file" accept="application/pdf" multiple style="display:none" @change="handleFileInput" />
+          </div>
+
+          <div v-if="billFiles.length" class="d-flex flex-column gap-2">
+            <v-card v-for="(f, i) in billFiles" :key="i" rounded="lg" elevation="0" border class="pa-2">
+              <div class="d-flex align-center">
+                <v-icon color="error" size="20" class="mr-2">mdi-file-pdf-box</v-icon>
+                <div class="flex-1 min-width-0">
+                  <div class="text-body-2 font-weight-medium text-truncate">{{ f.name }}</div>
+                  <div class="text-caption text-medium-emphasis">{{ (f.size/1024/1024).toFixed(2) }} MB</div>
+                </div>
+                <v-btn icon size="x-small" variant="text" color="error" @click="removeBillFile(i)">
+                  <v-icon size="14">mdi-close</v-icon>
+                </v-btn>
+              </div>
+            </v-card>
+          </div>
+        </v-card-text>
+
+        <v-card-actions class="pa-3 border-t">
+          <div class="text-caption text-medium-emphasis">{{ billFiles.length }} / 2 files attached</div>
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showBill = false">Cancel</v-btn>
+          <v-btn color="info" variant="flat" size="small" rounded="lg"
+            :loading="billLoading" prepend-icon="mdi-upload" @click="submitBill">
+            Submit Bills
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+
+    <!-- BILL APPROVAL MODAL -->
+    <v-dialog v-model="showBillApproval" max-width="480" class="bottom-sheet">
+      <v-card rounded="xl">
+        <v-toolbar density="compact" color="success" class="px-2">
+          <v-icon class="mr-2">mdi-check-circle</v-icon>
+          <v-toolbar-title class="text-body-1 font-weight-bold">Approve Bills</v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showBillApproval = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+        <v-card-text class="pa-4">
+          <p class="text-body-2 mb-3">
+            Approve all submitted bills for <strong>{{ selectedTicket?.ticketNumber }}</strong>?
+          </p>
+          <v-textarea v-model="billApprovalNotes"
+            label="Approval Notes (optional)" density="compact" variant="outlined" 
+            rows="3" auto-grow />
+        </v-card-text>
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showBillApproval = false">Cancel</v-btn>
+          <v-btn color="success" variant="flat" size="small" rounded="lg"
+            :loading="billActionLoading" prepend-icon="mdi-check" @click="submitBillApproval">
+            Approve Bills
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- BILL CORRECTIONS MODAL -->
+    <v-dialog v-model="showBillCorrections" max-width="480" class="bottom-sheet">
+      <v-card rounded="xl">
+        <v-toolbar density="compact" color="warning" class="px-2">
+          <v-icon class="mr-2">mdi-alert-circle</v-icon>
+          <v-toolbar-title class="text-body-1 font-weight-bold">Request Corrections</v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showBillCorrections = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+        <v-card-text class="pa-4">
+          <p class="text-body-2 mb-3">
+            Request corrections for <strong>{{ selectedTicket?.ticketNumber }}</strong>
+          </p>
+          <v-textarea v-model="billCorrectionNotes"
+            label="Correction Notes *" density="compact" variant="outlined" 
+            rows="4" auto-grow 
+            hint="Describe what needs to be corrected"
+            persistent-hint />
+        </v-card-text>
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showBillCorrections = false">Cancel</v-btn>
+          <v-btn color="warning" variant="flat" size="small" rounded="lg"
+            :loading="billActionLoading" 
+            :disabled="!billCorrectionNotes.trim()"
+            prepend-icon="mdi-send" @click="submitBillCorrections">
+            Request Corrections
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- BILL REJECTION MODAL -->
+    <v-dialog v-model="showBillRejection" max-width="480" class="bottom-sheet">
+      <v-card rounded="xl">
+        <v-toolbar density="compact" color="error" class="px-2">
+          <v-icon class="mr-2">mdi-close-circle</v-icon>
+          <v-toolbar-title class="text-body-1 font-weight-bold">Reject Bills</v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showBillRejection = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+        <v-card-text class="pa-4">
+          <v-alert type="error" variant="tonal" density="compact" class="mb-3">
+            This will close the ticket and reject all bills.
+          </v-alert>
+          <p class="text-body-2 mb-3">
+            Reject bills for <strong>{{ selectedTicket?.ticketNumber }}</strong>?
+          </p>
+          <v-textarea v-model="billRejectionReason"
+            label="Rejection Reason *" density="compact" variant="outlined" 
+            rows="4" auto-grow 
+            hint="Explain why the bills are being rejected"
+            persistent-hint />
+        </v-card-text>
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showBillRejection = false">Cancel</v-btn>
+          <v-btn color="error" variant="flat" size="small" rounded="lg"
+            :loading="billActionLoading" 
+            :disabled="!billRejectionReason.trim()"
+            prepend-icon="mdi-close" @click="submitBillRejection">
+            Reject Bills
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+  </div>`
+};
+
+
+// ── ticket-detail-modal ─────────────────────────────────────────────────────
+app.component('ticket-detail-modal', {
+  props: {
+    modelValue: Boolean,
+    ticket:     Object,
+    loading:    { type: Boolean, default: false },
+    canProcessPayments: { type: Boolean, default: false },
+    isOwner: { type: Boolean, default: false },
+  },
+  emits: ['update:modelValue','close','process-payment','submit-bills',
+        'approve-bills','request-corrections','reject-bills'],
+  setup(props, { emit }) {
+    const fd  = d => d ? new Date(d).toLocaleDateString('en-IN') : '—';
+    const fmt = v => (v||0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+    const getStatusColor = s => {
+      const l = (s||'').toLowerCase();
+      if (['billed','closed'].includes(l))              return 'success';
+      if (['created','payment_partial'].includes(l))    return 'warning';
+      if (['payment_full'].includes(l))                 return 'info';
+      if (['bill_rejected','force_closed'].includes(l)) return 'error';
+      return 'secondary';
+    };
+    const close         = () => emit('update:modelValue', false);
+    const processPayment= () => emit('process-payment');
+    const submitBills   = () => emit('submit-bills');
+    const canPay  = computed(() => props.canProcessPayments && props.ticket &&
+      ['CREATED','PAYMENT_PARTIAL'].includes(props.ticket.ticketStatus));
+    const canBill = computed(() => {
+      // Only allow bill submission for ADVANCE expense types
+      // REIMBURSEMENT expenses already submit bills during expense creation
+      if (!props.isOwner || !props.ticket) return false;
+      if (props.ticket.expenseType === 'REIMBURSEMENT') return false;
+      return props.ticket.ticketStatus === 'PAYMENT_FULL';
+    });
+    const canVerifyBills = computed(() => {
+      if (!props.canProcessPayments || !props.ticket) return false;
+      return ['BILLED', 'BILL_CORRECTION_NEEDED'].includes(props.ticket.ticketStatus);
+    });
+    const balance = computed(() => props.ticket
+      ? (props.ticket.amount||0) - (props.ticket.paidAmount||0) : 0);
+    const settlementInfo = computed(() => {
+      if (!props.ticket || !props.ticket.settlementType) return null;
+      return {
+        type: props.ticket.settlementType,
+        amount: props.ticket.settlementAmount || 0,
+        billTotal: props.ticket.totalBillAmount || 0,
+        settledAt: props.ticket.settledAt
+      };
+    });
+    const print = () => props.ticket && printExpense({ ...props.ticket, items: props.ticket.billItems || [] });
+    
+    // Extract latest bill submission and related computed properties
+    const latestBill = computed(() => {
+      const subs = props.ticket?.billJSON?.billSubmissions;
+      return (Array.isArray(subs) && subs.length) ? subs[subs.length - 1] : null;
+    });
+    
+    const billItems = computed(() => latestBill.value?.items || []);
+    const attachments = computed(() => latestBill.value?.attachments || []);
+    const courierInfo = computed(() => latestBill.value ? {
+      number: latestBill.value.courierNumber,
+      type: latestBill.value.courierType
+    } : null);
+    
+    // Extract payment history from paymentJSON
+    const paymentHistory = computed(() => props.ticket?.paymentJSON?.payments || []);
+    
+    return { fd, fmt, getStatusColor, close, processPayment, submitBills, 
+      canPay, canBill, canVerifyBills, balance, settlementInfo, print,
+      latestBill, billItems, attachments, courierInfo, paymentHistory };
+  },
+  template: `
+  <v-dialog :model-value="modelValue" @update:model-value="close" max-width="580" scrollable class="bottom-sheet">
+    <v-card v-if="ticket" rounded="xl">
+      <v-toolbar density="compact" color="surface" flat border="b" class="px-2">
+        <span class="text-caption text-medium-emphasis" style="font-family:monospace">
+          {{ ticket.ticketNumber }}
+        </span>
+        <v-spacer/>
+        <v-btn icon size="small" variant="text" @click="close">
+          <v-icon>mdi-close</v-icon>
+        </v-btn>
+      </v-toolbar>
+
+      <!-- Hero block — the one thing every approver needs to see immediately -->
+      <div class="px-5 pt-3 pb-4 info-surface mx-4 mt-2 mb-1 rounded-xl">
+        <div class="amount-display text-primary">
+          ₹{{ fmt(ticket.amount) }}
+        </div>
+        <div class="d-flex flex-wrap gap-2 mt-2">
+          <v-chip :color="getStatusColor(ticket.ticketStatus)" variant="flat" size="small" label>
+            {{ $utils.statusLabel(ticket.ticketStatus) }}
+          </v-chip>
+          <v-chip color="primary" variant="tonal" size="small" label>
+            {{ ticket.expenseType }}
+          </v-chip>
+        </div>
+      </div>
+
+      <v-card-text class="pa-4" style="max-height:72vh;overflow-y:auto">
+        <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-3" />
+
+        <!-- ── Info grid ── -->
+        <div class="info-surface mb-4">
+          <v-row dense>
+            <v-col cols="6">
+              <div class="detail-label">Employee</div>
+              <div class="detail-val">{{ ticket.employeeName || '—' }}</div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Bill Date</div>
+              <div class="detail-val">
+                {{ fd(ticket.billSubmittedAt
+                   || ticket.billJSON?.billSubmissions?.at(-1)?.submittedAt) }}
+              </div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Total Amount</div>
+              <div class="detail-val text-success font-weight-bold">₹{{ fmt(ticket.amount) }}</div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Paid</div>
+              <div class="detail-val text-success font-weight-bold">₹{{ fmt(ticket.paidAmount) }}</div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Balance</div>
+              <div class="detail-val font-weight-bold" :class="balance > 0 ? 'text-warning' : 'text-success'">₹{{ fmt(balance) }}</div>
+            </v-col>
+          </v-row>
+        </div>
+
+        <v-divider class="mb-3" />
+
+        <!-- Payment progress bar -->
+        <div class="mb-4">
+          <div class="d-flex justify-space-between mb-1">
+            <span class="text-caption text-medium-emphasis">Payment Progress</span>
+            <span class="text-caption font-weight-medium">{{ ticket.amount ? Math.round((ticket.paidAmount||0)/ticket.amount*100) : 0 }}%</span>
+          </div>
+          <v-progress-linear
+            :model-value="ticket.amount ? ((ticket.paidAmount||0)/ticket.amount)*100 : 0"
+            color="success" rounded height="6" bg-color="surface-variant" />
+        </div>
+
+        <!-- Settlement Info (for ADVANCE tickets after bill verification) -->
+        <template v-if="settlementInfo && ticket.expenseType === 'ADVANCE'">
+          <v-alert
+            :type="settlementInfo.type === 'EXCESS' ? 'success' : settlementInfo.type === 'DEFICIT' ? 'warning' : 'info'"
+            variant="tonal" density="compact" class="mb-4">
+            <div class="d-flex align-center justify-space-between">
+              <div>
+                <div class="font-weight-medium">
+                  {{ settlementInfo.type === 'EXCESS' ? 'Excess Reimbursable' : settlementInfo.type === 'DEFICIT' ? 'Deficit to Recover' : 'Fully Settled' }}
+                </div>
+                <div class="text-caption" v-if="settlementInfo.type !== 'SETTLED'">
+                  Bill Total: &#8377;{{ fmt(settlementInfo.billTotal) }} | Advance: &#8377;{{ fmt(ticket.amount) }}
+                </div>
+              </div>
+              <div class="text-h6 font-weight-bold" v-if="settlementInfo.amount > 0">
+                &#8377;{{ fmt(settlementInfo.amount) }}
+              </div>
+            </div>
+          </v-alert>
+        </template>
+
+        <!-- Payment hold warning (for employees) -->
+        <v-alert v-if="ticket.ticketStatus === 'PAYMENT_HOLD' && ticket.remarksFromAccounts"
+          type="warning" variant="tonal" density="compact" class="mb-4">
+          <div class="font-weight-medium">Payment is currently on hold</div>
+          <div class="text-caption">{{ ticket.remarksFromAccounts }}</div>
+        </v-alert>
+
+        <v-divider class="mb-3" />
+
+        <!-- Payment history -->
+        <template v-if="paymentHistory && paymentHistory.length">
+          <div class="text-overline text-medium-emphasis mb-2">PAYMENT HISTORY</div>
+          <v-list density="compact" class="pa-0 rounded-lg border mb-4">
+            <template v-for="(p, i) in paymentHistory" :key="i">
+              <v-list-item>
+                <template #prepend>
+                  <v-icon color="success" size="16">mdi-cash-check</v-icon>
+                </template>
+                <v-list-item-title class="text-body-2">
+                  ₹{{ fmt(p.amount) }} · {{ p.method }}
+                </v-list-item-title>
+                <v-list-item-subtitle class="text-caption">
+                  {{ fd(p.date) }}
+                  <span v-if="p.reference"> · Ref: {{ p.reference }}</span>
+                </v-list-item-subtitle>
+              </v-list-item>
+              <v-divider v-if="i < paymentHistory.length - 1" />
+            </template>
+          </v-list>
+        </template>
+
+        <!-- Bill items -->
+        <template v-if="billItems && billItems.length">
+          <div class="text-overline text-medium-emphasis mb-2">SUBMITTED BILLS</div>
+          <v-table density="compact" class="rounded-lg border mb-4">
+            <thead>
+              <tr>
+                <th class="text-caption">Head</th>
+                <th class="text-caption">Sub-Head</th>
+                <th class="text-caption">Description</th>
+                <th class="text-right text-caption">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(it, i) in billItems" :key="i">
+                <td><v-chip size="x-small" color="info" variant="tonal">{{ it.head }}</v-chip></td>
+                <td class="text-caption">{{ it.subHead || '—' }}</td>
+                <td class="text-caption text-medium-emphasis">{{ it.description || '—' }}</td>
+                <td class="text-right text-body-2 font-weight-medium">₹{{ fmt(it.amount) }}</td>
+              </tr>
+            </tbody>
+          </v-table>
+        </template>
+
+        <!-- Attachments -->
+        <template v-if="attachments && attachments.length">
+          <div class="text-overline text-medium-emphasis mb-2">ATTACHMENTS</div>
+          <div class="d-flex flex-column gap-2 mb-4">
+            <v-card v-for="att in attachments" :key="att.name" rounded="lg" elevation="0" border class="pa-2">
+              <div class="d-flex align-center gap-2">
+                <v-icon color="error" size="18">mdi-file-pdf-box</v-icon>
+                <span class="text-body-2">{{ att.name }}</span>
+                <v-spacer />
+                <span class="text-caption text-medium-emphasis" v-if="att.size">{{ (att.size/1024/1024).toFixed(2) }} MB</span>
+              </div>
+            </v-card>
+          </div>
+        </template>
+
+        <!-- Bill verification section (for Accounts) -->
+        <template v-if="canVerifyBills && billItems && billItems.length">
+          <v-divider class="my-4" />
+          <div class="text-overline text-medium-emphasis mb-2">BILL VERIFICATION</div>
+          
+          <v-table density="compact" class="rounded-lg border mb-3">
+            <thead>
+              <tr>
+                <th class="text-caption">#</th>
+                <th class="text-caption">Head</th>
+                <th class="text-caption">Description</th>
+                <th class="text-right text-caption">Amount</th>
+                <th class="text-caption">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(item, idx) in billItems" :key="idx">
+                <td class="text-caption text-medium-emphasis">{{ idx + 1 }}</td>
+                <td><v-chip size="x-small" color="info" variant="tonal">{{ item.head }}</v-chip></td>
+                <td class="text-caption">{{ item.description || '&#8212;' }}</td>
+                <td class="text-right font-weight-medium">&#8377;{{ (item.amount || 0).toLocaleString('en-IN') }}</td>
+                <td>
+                  <v-chip size="x-small" 
+                    :color="ticket.ticketStatus === 'VERIFIED' ? 'success' : 
+                            ticket.ticketStatus === 'BILL_CORRECTION_NEEDED' ? 'warning' : 'secondary'" 
+                    variant="tonal" label>
+                    {{ ticket.ticketStatus === 'VERIFIED' ? 'VERIFIED' : 
+                       ticket.ticketStatus === 'BILL_CORRECTION_NEEDED' ? 'CORRECTIONS NEEDED' : 'PENDING' }}
+                  </v-chip>
+                </td>
+              </tr>
+            </tbody>
+          </v-table>
+
+          <div class="text-body-2 text-medium-emphasis mb-3">
+            Review the submitted bills and attachments. Choose an action:
+          </div>
+          
+          <div class="d-flex flex-wrap gap-2">
+            <v-btn color="success" variant="flat" size="small" rounded="lg" 
+              prepend-icon="mdi-check-circle" @click="$emit('approve-bills', ticket)">
+              Approve All Bills
+            </v-btn>
+            <v-btn color="warning" variant="tonal" size="small" rounded="lg"
+              prepend-icon="mdi-alert-circle" @click="$emit('request-corrections', ticket)">
+              Request Corrections
+            </v-btn>
+            <v-btn color="error" variant="outlined" size="small" rounded="lg"
+              prepend-icon="mdi-close-circle" @click="$emit('reject-bills', ticket)">
+              Reject Bills
+            </v-btn>
+          </div>
+        </template>
+
+        <!-- Remarks -->
+        <template v-if="ticket.remarksFromAccounts">
+          <v-divider class="my-4" />
+          <div class="text-overline text-medium-emphasis mb-1">REMARKS</div>
+          <div class="text-body-2">{{ ticket.remarksFromAccounts }}</div>
+        </template>
+      </v-card-text>
+
+      <v-card-actions class="pa-3 border-t d-flex flex-wrap gap-2">
+        <!-- Employee Actions -->
+        <v-btn v-if="canBill" color="info" variant="tonal" size="small" rounded="lg"
+          prepend-icon="mdi-file-upload-outline" @click="submitBills">
+          Submit Bills
+        </v-btn>
+
+        <!-- Accounts Payment Actions -->
+        <v-btn v-if="canPay" color="success" variant="flat" size="small" rounded="lg"
+          prepend-icon="mdi-cash-plus" @click="processPayment">
+          Process Payment
+        </v-btn>
+        
+        <!-- Accounts Hold/Release Actions -->
+        <v-btn v-if="canProcessPayments && ['CREATED','PAYMENT_PARTIAL'].includes(ticket.ticketStatus)"
+          color="warning" variant="tonal" size="small" rounded="lg"
+          prepend-icon="mdi-pause-circle" @click="$emit('holdPayment', ticket)">
+          Hold Payment
+        </v-btn>
+        
+        <v-btn v-if="canProcessPayments && ticket.ticketStatus === 'PAYMENT_HOLD'"
+          color="success" variant="flat" size="small" rounded="lg"
+          prepend-icon="mdi-play-circle" @click="$emit('releaseHold', ticket)">
+          Release Hold
+        </v-btn>
+        
+        <v-spacer />
+        <v-btn variant="text" size="small" @click="close">Close</v-btn>
+      </v-card-actions>
+    </v-card>
+    <v-card v-else rounded="xl" class="pa-8 text-center">
+      <v-progress-circular indeterminate />
+    </v-card>
+  </v-dialog>`
+});
+
+console.log('✅ Views loaded: LoginView · DashboardView · ExpensesView · TicketsView');
+console.log('✅ Shared modals: expense-detail-modal · ticket-detail-modal');
+</script>
+
+<style>
+/* ── Page transitions ── */
+.page-fade { animation: pageFade 0.2s ease; }
+@keyframes pageFade {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ── Stat cards ── */
+.stat-card { transition: box-shadow 0.2s ease, transform 0.2s ease !important; }
+.stat-card:hover { box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important; transform: translateY(-2px); }
+
+/* ── Welcome avatar ── */
+.welcome-avatar {
+  width: 48px; height: 48px; border-radius: 14px;
+  background: rgba(var(--v-theme-primary), 0.10); flex-shrink: 0;
+}
+
+/* ── Border & layout utils ── */
+.border-b { border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.border-t { border-top:    1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.h-100    { height: 100%; }
+.cursor-pointer { cursor: pointer; }
+.gap-1{gap:4px}.gap-2{gap:8px}.gap-3{gap:12px}.gap-4{gap:16px}
+.min-width-0 { min-width: 0; }
+.flex-1 { flex: 1; }
+
+/* ── Detail modal labels/values ── */
+.detail-label {
+  font-size: 10px;
+  color: rgba(var(--v-theme-on-surface), 0.5);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+.detail-val {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: rgba(var(--v-theme-on-surface), 0.9);
+  line-height: 1.4;
+}
+
+/* ── PDF upload zone ── */
+.bill-upload-zone {
+  border: 2px dashed rgba(var(--v-border-color), 0.4);
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.bill-upload-zone:hover {
+  border-color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), 0.03);
+}
+
+/* ── Login background ── */
+.login-bg {
+  min-height: 100vh;
+  background: rgb(var(--v-theme-background));
+}
+</style>

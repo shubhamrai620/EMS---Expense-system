@@ -1,0 +1,1281 @@
+<script>
+
+// ═══════════════════════════════════════════════════════════════════════════
+// a-v-payment-view.html
+//
+// ACCESS:  Admin + Accounts only  (route meta: accountsOnly: true)
+// PURPOSE: Full payment lifecycle management
+//          • Lists all tickets that are in a payment state
+//          • Payment Detail Modal — expense info + full payment ledger
+//          • Process partial / full payments
+//          • Hold / Release hold
+//          • Reimbursement closure when ticket is closed
+//
+// ADD TO ROUTER (in your main app file):
+//   {
+//     path:  '/payments',
+//     name:  'payments',
+//     component: PaymentView,
+//     meta: { title: 'Payments', icon: 'mdi-cash-multiple', accountsOnly: true }
+//   }
+//
+// ADD TO NAVBAR GUARD (in vue-components.html pages computed):
+//   if (r.meta?.accountsOnly) return isAdmin.value || isAccounts.value;
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAYMENT DETAIL MODAL  (global component)
+//
+// Reuses the same layout grid as expense-detail-modal for familiarity,
+// but adds a full Payment Ledger section at the bottom.
+//
+// Props:
+//   modelValue          Boolean   — v-model open/close
+//   ticket              Object    — full ticket record (with paymentJSON)
+//   loading             Boolean   — shimmer while fetching
+//   canProcessPayments  Boolean   — show payment action buttons
+//
+// Emits:
+//   update:modelValue
+//   process-payment     — open ProcessPayment sub-dialog
+//   hold-payment        — open HoldPayment sub-dialog
+//   release-hold        — open ReleaseHold sub-dialog
+// ─────────────────────────────────────────────────────────────────────────────
+app.component('payment-detail-modal', {
+  props: {
+    modelValue:         Boolean,
+    ticket:             Object,
+    loading:            { type: Boolean, default: false },
+    canProcessPayments: { type: Boolean, default: false },
+  },
+  emits: ['update:modelValue', 'process-payment', 'hold-payment', 'release-hold'],
+
+  setup(props, { emit }) {
+    const fd  = d => d ? new Date(d).toLocaleDateString('en-IN') : '—';
+    const fmt = v => (v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+
+    const getStatusColor = s => {
+      const l = (s || '').toLowerCase();
+      if (['billed', 'closed', 'verified', 'settled'].includes(l))  return 'success';
+      if (['created', 'payment_partial'].includes(l))          return 'warning';
+      if (['payment_full'].includes(l))                        return 'info';
+      if (['payment_hold'].includes(l))                        return 'orange';
+      if (['bill_rejected', 'force_closed'].includes(l))       return 'error';
+      if (['reimbursed_closed', 'reimbursement_closed'].includes(l)) return 'teal';
+      return 'secondary';
+    };
+
+    const close = () => emit('update:modelValue', false);
+
+    // ── Payment computed helpers ──────────────────────────────────────────
+    const paymentHistory = computed(() => props.ticket?.paymentJSON?.payments || []);
+
+    const totalApproved  = computed(() => props.ticket?.amount || 0);
+    const totalPaid      = computed(() => props.ticket?.paidAmount || 0);
+    const totalRemaining = computed(() => totalApproved.value - totalPaid.value);
+    const paymentPct     = computed(() =>
+      totalApproved.value ? Math.round((totalPaid.value / totalApproved.value) * 100) : 0
+    );
+
+    // Payment mode label (FULL / PARTIAL / PENDING / ON HOLD / CLOSED)
+    const paymentModeLabel = computed(() => {
+      const s = (props.ticket?.ticketStatus || '').toUpperCase();
+      if (['REIMBURSED_CLOSED', 'REIMBURSEMENT_CLOSED'].includes(s)) return { label: 'CLOSED AFTER REIMBURSEMENT', color: 'teal' };
+      if (s === 'SETTLED')         return { label: 'SETTLED',         color: 'success' };
+      if (s === 'PAYMENT_HOLD')    return { label: 'ON HOLD',        color: 'orange' };
+      if (s === 'BILLED')          return { label: 'FULL — AWAITING BILL', color: 'info' };
+      if (s === 'CLOSED')          return { label: 'CLOSED',          color: 'success' };
+      if (totalPaid.value <= 0)    return { label: 'PENDING',         color: 'warning' };
+      if (totalRemaining.value <= 0) return { label: 'FULLY PAID',    color: 'success' };
+      return { label: 'PARTIAL PAYMENT', color: 'warning' };
+    });
+
+    // Action button visibility
+    const canPay     = computed(() => props.canProcessPayments && props.ticket &&
+      ['CREATED', 'PAYMENT_PARTIAL'].includes(props.ticket.ticketStatus));
+    const canHold    = computed(() => props.canProcessPayments && props.ticket &&
+      ['CREATED', 'PAYMENT_PARTIAL'].includes(props.ticket.ticketStatus));
+    const canRelease = computed(() => props.canProcessPayments && props.ticket &&
+      props.ticket.ticketStatus === 'PAYMENT_HOLD');
+
+    // Expense info from ticket (tickets carry the expense summary)
+    const expenseItems = computed(() => {
+      const latest = props.ticket?.billJSON?.billSubmissions;
+      return (Array.isArray(latest) && latest.length)
+        ? latest[latest.length - 1]?.items || []
+        : props.ticket?.expenseItems || [];
+    });
+
+    return {
+      fd, fmt, getStatusColor, close,
+      paymentHistory, totalApproved, totalPaid, totalRemaining, paymentPct,
+      paymentModeLabel, canPay, canHold, canRelease, expenseItems,
+    };
+  },
+
+  template: `
+  <v-dialog :model-value="modelValue" @update:model-value="close" max-width="660" scrollable class="bottom-sheet">
+    <v-card v-if="ticket" rounded="xl">
+
+      <!-- ── Toolbar ── -->
+      <v-toolbar density="compact" color="surface" flat class="px-2" border="b">
+        <v-icon class="mr-2" color="teal-darken-2">mdi-cash-multiple</v-icon>
+        <v-toolbar-title class="text-body-1 font-weight-bold">
+          {{ ticket.ticketNumber }}
+          <span class="text-caption ml-2 opacity-70" v-if="ticket.referenceNumber">
+            · {{ ticket.referenceNumber }}
+          </span>
+        </v-toolbar-title>
+        <v-spacer />
+        <v-btn icon size="small" variant="text" @click="close">
+          <v-icon>mdi-close</v-icon>
+        </v-btn>
+      </v-toolbar>
+
+      <!-- Employee + Amount Summary Header -->
+      <div class="px-4 py-3 d-flex align-center justify-space-between"
+        style="background: rgba(var(--v-theme-teal), 0.06); border-bottom: 1px solid rgba(var(--v-border-color), .1);">
+        <div>
+          <div class="text-body-2 font-weight-bold">{{ ticket.employeeName || '—' }}</div>
+          <div class="text-caption text-medium-emphasis">{{ ticket.projectCode }} · {{ ticket.expenseType || 'ADVANCE' }}</div>
+        </div>
+        <div class="text-right">
+          <div class="text-h6 font-weight-bold text-primary">₹{{ fmt(totalApproved) }}</div>
+          <div class="text-caption text-medium-emphasis">Total Approved</div>
+        </div>
+      </div>
+
+      <v-card-text class="pa-4" style="max-height:76vh;overflow-y:auto">
+        <v-progress-linear v-if="loading" indeterminate color="teal" class="mb-3" />
+
+        <!-- ── Status badges ── -->
+        <div class="d-flex flex-wrap gap-2 mb-4">
+          <v-chip :color="getStatusColor(ticket.ticketStatus)" variant="flat" size="small" label>
+            {{ $utils.statusLabel(ticket.ticketStatus) }}
+          </v-chip>
+          <v-chip :color="paymentModeLabel.color" variant="tonal" size="small" label>
+            {{ paymentModeLabel.label }}
+          </v-chip>
+          <v-chip v-if="ticket.referenceNumber" color="secondary" variant="tonal" size="small" label>
+            Exp: {{ ticket.referenceNumber }}
+          </v-chip>
+        </div>
+
+        <!-- ── Key figures (same grid layout as expense-detail-modal) ── -->
+        <v-row dense class="mb-3">
+          <v-col cols="6" sm="3">
+            <div class="detail-label">Employee</div>
+            <div class="detail-val">{{ ticket.employeeName || '—' }}</div>
+          </v-col>
+          <v-col cols="6" sm="3">
+            <div class="detail-label">Project</div>
+            <div class="detail-val">{{ ticket.projectCode || '—' }}</div>
+          </v-col>
+          <v-col cols="6" sm="3">
+            <div class="detail-label">Created On</div>
+            <div class="detail-val">{{ fd(ticket.createdAt) }}</div>
+          </v-col>
+          <v-col cols="6" sm="3">
+            <div class="detail-label">Expense Type</div>
+            <div class="detail-val">{{ ticket.expenseType || 'ADVANCE' }}</div>
+          </v-col>
+        </v-row>
+
+        <v-divider class="mb-4" />
+
+        <!-- ══════════════════════════════════════════════════════════
+             PAYMENT SUMMARY BLOCK
+             ══════════════════════════════════════════════════════════ -->
+        <div class="text-overline text-medium-emphasis mb-3">PAYMENT SUMMARY</div>
+
+        <!-- 3-column amount strip -->
+        <v-row dense class="mb-3">
+          <v-col cols="4">
+            <v-card rounded="lg" elevation="0" class="pa-3 text-center"
+              style="background: rgba(var(--v-theme-primary), 0.06); border: 1px solid rgba(var(--v-theme-primary), 0.15);">
+              <div class="detail-label mb-1">Approved</div>
+              <div class="text-h6 font-weight-bold text-primary">₹{{ fmt(totalApproved) }}</div>
+            </v-card>
+          </v-col>
+          <v-col cols="4">
+            <v-card rounded="lg" elevation="0" class="pa-3 text-center"
+              style="background: rgba(var(--v-theme-success), 0.06); border: 1px solid rgba(var(--v-theme-success), 0.15);">
+              <div class="detail-label mb-1">Paid</div>
+              <div class="text-h6 font-weight-bold text-success">₹{{ fmt(totalPaid) }}</div>
+            </v-card>
+          </v-col>
+          <v-col cols="4">
+            <v-card rounded="lg" elevation="0" class="pa-3 text-center"
+              :style="totalRemaining > 0
+                ? 'background: rgba(var(--v-theme-warning), 0.06); border: 1px solid rgba(var(--v-theme-warning), 0.15);'
+                : 'background: rgba(var(--v-theme-success), 0.06); border: 1px solid rgba(var(--v-theme-success), 0.15);'">
+              <div class="detail-label mb-1">Remaining</div>
+              <div class="text-h6 font-weight-bold" :class="totalRemaining > 0 ? 'text-warning' : 'text-success'">
+                ₹{{ fmt(totalRemaining) }}
+              </div>
+            </v-card>
+          </v-col>
+        </v-row>
+
+        <!-- Payment progress bar -->
+        <div class="mb-1">
+          <div class="d-flex justify-space-between mb-1">
+            <span class="text-caption text-medium-emphasis">Payment Progress</span>
+            <span class="text-caption font-weight-bold" :class="paymentPct >= 100 ? 'text-success' : 'text-warning'">
+              {{ paymentPct }}%
+            </span>
+          </div>
+          <v-progress-linear
+            :model-value="paymentPct"
+            :color="paymentPct >= 100 ? 'success' : 'warning'"
+            rounded height="8" bg-color="surface-variant" />
+        </div>
+
+        <!-- Hold warning banner -->
+        <v-alert v-if="ticket.ticketStatus === 'PAYMENT_HOLD' && ticket.remarksFromAccounts"
+          type="warning" variant="tonal" density="compact" class="mt-4">
+          <div class="font-weight-medium">Payment On Hold</div>
+          <div class="text-caption">{{ ticket.remarksFromAccounts }}</div>
+        </v-alert>
+
+        <!-- Reimbursement closed banner -->
+        <v-alert
+          v-if="['REIMBURSED_CLOSED','REIMBURSEMENT_CLOSED'].includes((ticket.ticketStatus||'').toUpperCase())"
+          type="success" variant="tonal" density="compact" class="mt-4">
+          <div class="font-weight-medium">Reimbursement Closed</div>
+          <div class="text-caption">This expense has been fully settled and the ticket is closed.</div>
+        </v-alert>
+
+        <v-divider class="my-4" />
+
+        <!-- ══════════════════════════════════════════════════════════
+             PAYMENT LEDGER  (all individual payment entries)
+             ══════════════════════════════════════════════════════════ -->
+        <div class="text-overline text-medium-emphasis mb-2">PAYMENT LEDGER</div>
+
+        <v-table v-if="paymentHistory.length" density="compact" class="rounded-lg border mb-4">
+          <thead>
+            <tr>
+              <th class="text-caption">#</th>
+              <th class="text-caption">Date</th>
+              <th class="text-caption">Mode</th>
+              <th class="text-caption">Reference</th>
+              <th class="text-caption">Notes</th>
+              <th class="text-right text-caption">Amount</th>
+              <th class="text-caption">Type</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(p, i) in paymentHistory" :key="i">
+              <td class="text-caption text-medium-emphasis">{{ i + 1 }}</td>
+              <td class="text-caption">{{ fd(p.date || p.paymentDate) }}</td>
+              <td>
+                <v-chip size="x-small" color="teal" variant="tonal" label>
+                  {{ p.method || p.paymentMode || '—' }}
+                </v-chip>
+              </td>
+              <td class="text-caption">{{ p.reference || p.transactionRef || '—' }}</td>
+              <td class="text-caption text-medium-emphasis">{{ p.notes || '—' }}</td>
+              <td class="text-right font-weight-bold text-body-2 text-success">
+                ₹{{ (p.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 }) }}
+              </td>
+              <td>
+                <v-chip size="x-small"
+                  :color="i === paymentHistory.length - 1 && totalRemaining <= 0 ? 'success' : 'warning'"
+                  variant="tonal" label>
+                  {{ i === paymentHistory.length - 1 && totalRemaining <= 0 ? 'FULL' : 'PARTIAL' }}
+                </v-chip>
+              </td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="5" class="text-right font-weight-bold pa-2 text-body-2">Total Paid</td>
+              <td class="text-right font-weight-bold pa-2 text-success text-body-1">
+                ₹{{ totalPaid.toLocaleString('en-IN', { minimumFractionDigits: 2 }) }}
+              </td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </v-table>
+
+        <v-alert v-else-if="!loading" type="info" variant="tonal" density="compact" class="mb-4">
+          No payments recorded yet.
+        </v-alert>
+
+        <v-divider class="mb-4" />
+
+        <!-- ══════════════════════════════════════════════════════════
+             EXPENSE ITEMS  (same table as expense-detail-modal)
+             Shows what the advance was taken for — read-only reference
+             ══════════════════════════════════════════════════════════ -->
+        <div class="text-overline text-medium-emphasis mb-2">EXPENSE ITEMS</div>
+        <v-table v-if="expenseItems.length" density="compact" class="rounded-lg border mb-4">
+          <thead>
+            <tr>
+              <th class="text-caption">Head</th>
+              <th class="text-caption">Sub-Head</th>
+              <th class="text-caption">Description</th>
+              <th class="text-right text-caption">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(it, i) in expenseItems" :key="i">
+              <td><v-chip size="x-small" color="primary" variant="tonal" label>{{ it.head }}</v-chip></td>
+              <td class="text-caption">{{ it.subHead || '—' }}</td>
+              <td class="text-caption text-medium-emphasis">{{ it.description || '—' }}</td>
+              <td class="text-right text-body-2 font-weight-medium">
+                ₹{{ (it.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 }) }}
+              </td>
+            </tr>
+          </tbody>
+        </v-table>
+        <v-alert v-else-if="!loading" type="info" variant="tonal" density="compact" class="mb-4">
+          No expense items on record.
+        </v-alert>
+
+        <!-- ── Remarks ── -->
+        <template v-if="ticket.remarksFromAccounts && ticket.ticketStatus !== 'PAYMENT_HOLD'">
+          <v-divider class="mb-3" />
+          <div class="text-overline text-medium-emphasis mb-1">REMARKS</div>
+          <div class="text-body-2">{{ ticket.remarksFromAccounts }}</div>
+        </template>
+
+      </v-card-text>
+
+      <!-- ── Action bar ── -->
+      <v-card-actions class="pa-3 border-t d-flex flex-wrap gap-2">
+
+        <!-- Hold / Release -->
+        <v-btn v-if="canHold" color="warning" variant="tonal" size="small" rounded="lg"
+          prepend-icon="mdi-pause-circle"
+          @click="$emit('hold-payment', ticket)">
+          Hold Payment
+        </v-btn>
+        <v-btn v-if="canRelease" color="success" variant="tonal" size="small" rounded="lg"
+          prepend-icon="mdi-play-circle"
+          @click="$emit('release-hold', ticket)">
+          Release Hold
+        </v-btn>
+
+        <v-spacer />
+        <v-btn variant="text" size="small" @click="close">Close</v-btn>
+
+        <!-- Process Payment (primary action) -->
+        <v-btn v-if="canPay" color="teal-darken-1" variant="flat" size="small" rounded="lg"
+          prepend-icon="mdi-cash-plus"
+          @click="$emit('process-payment', ticket)">
+          Process Payment
+        </v-btn>
+
+      </v-card-actions>
+    </v-card>
+
+    <v-card v-else rounded="xl" class="pa-8 text-center">
+      <v-progress-circular indeterminate />
+    </v-card>
+  </v-dialog>`
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PAYMENT VIEW
+// ═══════════════════════════════════════════════════════════════════════════
+const PaymentView = {
+  name: 'PaymentView',
+  setup() {
+    const store = useStore();
+    const { smAndDown } = useDisplay();
+
+    // ── Auth ──────────────────────────────────────────────────────────────
+    const userRole           = computed(() => store.getters['auth/userRole']);
+    const canProcessPayments = computed(() => store.getters['auth/canProcessPayments']);
+    // Guard: only Accounts + Admin should ever reach this view
+    // (the route meta guard in the router is the primary guard)
+
+    // ── Data ──────────────────────────────────────────────────────────────
+    // All tickets that are in any payment-relevant state
+    const allTickets = computed(() => store.getters['tickets/all'] || []);
+    const isLoading  = computed(() => store.getters['tickets/isLoading']);
+
+    // NEW: Pending ADVANCE expenses (approved but not yet ticketed)
+    const allExpenses = computed(() => store.getters['expenses/all'] || []);
+    const pendingAdvanceExpenses = computed(() => {
+      return (allExpenses.value || []).filter(exp =>
+        exp.expenseStatus === 'APPROVED' &&
+        exp.expenseType === 'ADVANCE' &&
+        !exp.ticketNumber
+      );
+    });
+
+    // ── Tabs — 2-tab structure for enhanced workflow ──────────────────────
+    const activeTab = ref('pending');
+    
+    // Tab-specific ticket lists
+    const pendingPayments = computed(() => 
+      allTickets.value.filter(t => ['CREATED', 'PAYMENT_PARTIAL'].includes(t.ticketStatus))
+    );
+    
+    const allPayments = computed(() => allTickets.value);
+
+    // Payment-relevant ticket statuses (exclude pure bill states)
+    const PAYMENT_STATUSES = ['CREATED', 'PAYMENT_PARTIAL', 'PAYMENT_FULL', 'PAYMENT_HOLD', 'BILLED', 'SETTLED', 'CLOSED', 'FORCE_CLOSED'];
+
+    // ── Summary counts for stat cards ────────────────────────────────────
+    const stats = computed(() => ({
+      pending:   allTickets.value.filter(t => t.ticketStatus === 'CREATED').length,
+      partial:   allTickets.value.filter(t => t.ticketStatus === 'PAYMENT_PARTIAL').length,
+      onHold:    allTickets.value.filter(t => t.ticketStatus === 'PAYMENT_HOLD').length,
+      fullPaid:  allTickets.value.filter(t => ['PAYMENT_FULL','BILLED'].includes(t.ticketStatus)).length,
+      closed:    allTickets.value.filter(t => ['CLOSED','FORCE_CLOSED','REIMBURSED_CLOSED','SETTLED'].includes(t.ticketStatus)).length,
+      totalValue: allTickets.value.reduce((s, t) => s + (t.amount || 0), 0),
+      paidValue:  allTickets.value.reduce((s, t) => s + (t.paidAmount || 0), 0),
+    }));
+
+    const statCards = computed(() => [
+      { label: 'Pending Payment', value: stats.value.pending,  color: 'warning', icon: 'mdi-clock-outline' },
+      { label: 'Partial Paid',    value: stats.value.partial,  color: 'orange',  icon: 'mdi-cash-minus' },
+      { label: 'On Hold',         value: stats.value.onHold,   color: 'error',   icon: 'mdi-pause-circle-outline' },
+      { label: 'Fully Paid',      value: stats.value.fullPaid, color: 'success', icon: 'mdi-cash-check' },
+    ]);
+
+    // ── Filters ───────────────────────────────────────────────────────────
+    const filterStatus = ref('');
+    const filterSearch = ref('');
+    const filterDateFrom = ref('');
+    const filterDateTo = ref('');
+    const filterQuick = ref(''); // Quick filter chips
+
+    // Total outstanding calculation
+    const totalOutstanding = computed(() => {
+      return allTickets.value
+        .filter(t => ['CREATED', 'PAYMENT_PARTIAL', 'PAYMENT_HOLD'].includes(t.ticketStatus))
+        .reduce((sum, t) => sum + ((t.amount || 0) - (t.paidAmount || 0)), 0);
+    });
+
+    // ── Format helpers ──────────────────────────────────────
+    const fd  = d => d ? new Date(d).toLocaleDateString('en-IN') : '—';
+    const fmt = v => (v || 0).toLocaleString('en-IN', { minimumFractionDigits: 0 });
+
+    // Export to CSV
+    const exportToCSV = () => {
+      const data = filteredPayments.value.map(item => ({
+        'Ref #': item.refNumber || '',
+        'Ticket #': item.ticketNumber || '',
+        'Type': item.type,
+        'Employee': item.employeeName || '',
+        'Amount': item.amount || 0,
+        'Paid': item.paidAmount || 0,
+        'Remaining': (item.amount || 0) - (item.paidAmount || 0),
+        'Status': item.status,
+        'Created': fd(item.createdAt),
+      }));
+      
+      const headers = Object.keys(data[0] || {});
+      const csvContent = [
+        headers.join(','),
+        ...data.map(row => headers.map(h => `"${row[h]}"`).join(','))
+      ].join('\n');
+      
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `payments_export_${new Date().toISOString().split('T')[0]}.csv`;
+      link.click();
+    };
+
+    const STATUS_OPTIONS = [
+      { title: 'All', value: '' },
+      { title: 'Pending (CREATED)',    value: 'CREATED' },
+      { title: 'Partial Payment',      value: 'PAYMENT_PARTIAL' },
+      { title: 'On Hold',              value: 'PAYMENT_HOLD' },
+      { title: 'Full Paid',            value: 'PAYMENT_FULL' },
+      { title: 'Billed',               value: 'BILLED' },
+      { title: 'Closed',               value: 'CLOSED' },
+    ];
+
+    // Unified payment list combining ADVANCE expenses and tickets
+    const unifiedPayments = computed(() => {
+      // Convert pending ADVANCE expenses to unified format
+      const advanceItems = pendingAdvanceExpenses.value.map(exp => ({
+        id: exp.referenceNumber,
+        type: 'ADVANCE',
+        refNumber: exp.referenceNumber,
+        ticketNumber: null,
+        employeeName: exp.employeeName || exp.name || exp.email,
+        expenseDate: exp.expenseDate,
+        amount: exp.totalApprovedAmount || exp.amount || 0,
+        paidAmount: 0,
+        status: 'ADVANCE_PENDING',
+        createdAt: exp.createdAt,
+        updatedAt: exp.updatedAt,
+        raw: exp
+      }));
+      
+      // Convert tickets to unified format
+      const ticketItems = allTickets.value
+        .filter(t => PAYMENT_STATUSES.includes(t.ticketStatus))
+        .map(t => ({
+          id: t.ticketNumber,
+          type: 'TICKET',
+          refNumber: t.referenceNumber,
+          ticketNumber: t.ticketNumber,
+          employeeName: t.employeeName,
+          expenseDate: t.expenseDate || t.createdAt,
+          amount: t.amount || 0,
+          paidAmount: t.paidAmount || 0,
+          status: t.ticketStatus,
+          createdAt: t.createdAt,
+          updatedAt: t.updatedAt,
+          raw: t
+        }));
+      
+      return [...advanceItems, ...ticketItems];
+    });
+
+    const filteredPayments = computed(() => {
+      let list = unifiedPayments.value;
+      
+      // Apply tab-based filtering
+      if (activeTab.value === 'pending') {
+        list = list.filter(item => 
+          item.status === 'ADVANCE_PENDING' || 
+          ['CREATED', 'PAYMENT_PARTIAL'].includes(item.status)
+        );
+      }
+      
+      // Apply quick filters
+      if (filterQuick.value === 'partial') {
+        list = list.filter(item => item.status === 'PAYMENT_PARTIAL');
+      } else if (filterQuick.value === 'full') {
+        list = list.filter(item => ['PAYMENT_FULL', 'BILLED'].includes(item.status));
+      } else if (filterQuick.value === 'hold') {
+        list = list.filter(item => item.status === 'PAYMENT_HOLD');
+      }
+      
+      // Apply other filters
+      if (filterStatus.value) list = list.filter(item => item.status === filterStatus.value);
+      if (filterSearch.value) {
+        const q = filterSearch.value.toLowerCase();
+        list = list.filter(item =>
+          (item.refNumber || '').toLowerCase().includes(q) ||
+          (item.ticketNumber || '').toLowerCase().includes(q) ||
+          (item.employeeName || '').toLowerCase().includes(q)
+        );
+      }
+      // Date range filter
+      if (filterDateFrom.value) {
+        const from = new Date(filterDateFrom.value);
+        list = list.filter(item => new Date(item.createdAt) >= from);
+      }
+      if (filterDateTo.value) {
+        const to = new Date(filterDateTo.value);
+        to.setHours(23, 59, 59);
+        list = list.filter(item => new Date(item.createdAt) <= to);
+      }
+      return list;
+    });
+
+    const getStatusColor = s => {
+      const l = (s || '').toLowerCase();
+      if (['billed','closed','settled'].includes(l))                    return 'success';
+      if (['created', 'advance_pending'].includes(l))             return 'warning';
+      if (['payment_partial'].includes(l))                       return 'orange';
+      if (['payment_full'].includes(l))                          return 'info';
+      if (['payment_hold'].includes(l))                          return 'error';
+      if (['reimbursed_closed','reimbursement_closed'].includes(l)) return 'teal';
+      if (['force_closed'].includes(l))                          return 'error';
+      return 'secondary';
+    };
+
+    // ── Table headers ─────────────────────────────────────────────────────
+    const headers = [
+      { title: 'Ref #',          key: 'refNumber',         width: '140px' },
+      { title: 'Ticket #',       key: 'ticketNumber',      width: '130px' },
+      { title: 'Employee',       key: 'employeeName',      width: '150px' },
+      { title: 'Date',           key: 'expenseDate',       width: '110px' },
+      { title: 'Amount',         key: 'amount',            width: '110px', align: 'end' },
+      { title: 'Paid',           key: 'paidAmount',        width: '100px', align: 'end' },
+      { title: 'Remaining',      key: 'remaining',         width: '110px', align: 'end' },
+      { title: 'Status',         key: 'status',            width: '140px' },
+      { title: '',               key: 'actions', sortable: false, width: '80px', align: 'end' },
+    ];
+
+    // ── Detail modal ──────────────────────────────────────────────────────
+    const showDetail    = ref(false);
+    const detailLoading = ref(false);
+    const selectedTicket= ref(null);
+
+    const openDetail = async (t) => {
+      showDetail.value     = true;
+      selectedTicket.value = t;
+      if (!t.paymentJSON || !t.billJSON) {
+        detailLoading.value = true;
+        try {
+          const full = await store.dispatch('tickets/fetchTicket', t.ticketNumber);
+          selectedTicket.value = full;
+        } catch (e) {
+          console.warn('Could not refresh ticket data:', e.message);
+        } finally {
+          detailLoading.value = false;
+        }
+      }
+    };
+    const closeDetail = () => { showDetail.value = false; selectedTicket.value = null; };
+
+    // ── Process Payment modal ─────────────────────────────────────────────
+    const showPayment    = ref(false);
+    const paymentLoading = ref(false);
+    const paymentExpenseRef = ref(null);  // NEW: Track if paying for expense or ticket
+    const paymentForm    = ref({
+      amount:         null,
+      paymentMode:    'NEFT',
+      transactionRef: '',
+      paymentDate:    '',
+      billDate:       '',
+      notes:          '',
+    });
+
+    const openPayment = (ticketOrExpense) => {
+      // Determine if this is a ticket or expense
+      const isExpense = !ticketOrExpense.ticketNumber;
+      paymentExpenseRef.value = isExpense ? ticketOrExpense.referenceNumber : null;
+      
+      // Pre-fill remaining amount
+      const remaining = (ticketOrExpense.totalApprovedAmount || ticketOrExpense.amount || 0) - 
+                       (ticketOrExpense.totalPaidAmount || ticketOrExpense.paidAmount || 0);
+      paymentForm.value = {
+        amount:         remaining > 0 ? remaining : null,
+        paymentMode:    'NEFT',
+        transactionRef: '',
+        paymentDate:    new Date().toISOString().split('T')[0],
+        billDate:       '',
+        notes:          '',
+      };
+      showPayment.value = true;
+    };
+
+    const submitPayment = async () => {
+      if (!paymentForm.value.amount || paymentForm.value.amount <= 0) {
+        store.dispatch('ui/showSnackbar', { message: 'Enter a valid payment amount.', color: 'warning' });
+        return;
+      }
+      paymentLoading.value = true;
+      try {
+        // NEW: Check if paying for expense or ticket
+        if (paymentExpenseRef.value) {
+          // Paying for ADVANCE expense (no ticket yet)
+          await store.dispatch('expenses/processExpensePayment', {
+            referenceNumber: paymentExpenseRef.value,
+            amount:         paymentForm.value.amount,
+            paymentMode:    paymentForm.value.paymentMode,
+            transactionRef: paymentForm.value.transactionRef,
+            paymentDate:    paymentForm.value.paymentDate,
+            notes:          paymentForm.value.notes,
+          });
+          showPayment.value = false;
+          // Refresh both expenses and tickets lists
+          await store.dispatch('expenses/fetchExpenses');
+          await store.dispatch('tickets/fetchTickets');
+        } else {
+          // Paying for ticket (traditional payment)
+          await store.dispatch('tickets/processPayment', {
+            ticketNumber:   selectedTicket.value.ticketNumber,
+            amount:         paymentForm.value.amount,
+            paymentMode:    paymentForm.value.paymentMode,
+            transactionRef: paymentForm.value.transactionRef,
+            paymentDate:    paymentForm.value.paymentDate,
+            billDate:       paymentForm.value.billDate,
+            notes:          paymentForm.value.notes,
+          });
+          showPayment.value = false;
+          // Refresh tickets list
+          const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+          selectedTicket.value = full;
+          await store.dispatch('tickets/fetchTickets');
+        }
+      } catch (e) { /* handled by store */ }
+      finally { paymentLoading.value = false; }
+    };
+
+    // ── Hold Payment modal ────────────────────────────────────────────────
+    const showHold    = ref(false);
+    const holdLoading = ref(false);
+    const holdReason  = ref('');
+
+    const openHold = () => {
+      holdReason.value = '';
+      showHold.value   = true;
+    };
+
+    const submitHold = async () => {
+      if (!holdReason.value.trim()) {
+        store.dispatch('ui/showSnackbar', { message: 'Please provide a reason for hold.', color: 'warning' });
+        return;
+      }
+      holdLoading.value = true;
+      try {
+        await store.dispatch('tickets/holdPayment', {
+          ticketNumber: selectedTicket.value.ticketNumber,
+          holdReason:   holdReason.value,
+        });
+        showHold.value = false;
+        const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+        selectedTicket.value = full;
+        await store.dispatch('tickets/fetchTickets');
+      } catch (e) { /* handled by store */ }
+      finally { holdLoading.value = false; }
+    };
+
+    // ── Release Hold modal ────────────────────────────────────────────────
+    const showRelease    = ref(false);
+    const releaseLoading = ref(false);
+    const releaseNotes   = ref('');
+
+    const openRelease = () => {
+      releaseNotes.value = '';
+      showRelease.value  = true;
+    };
+
+    const submitRelease = async () => {
+      releaseLoading.value = true;
+      try {
+        await store.dispatch('tickets/releasePaymentHold', {
+          ticketNumber: selectedTicket.value.ticketNumber,
+          releaseNotes: releaseNotes.value,
+        });
+        showRelease.value = false;
+        const full = await store.dispatch('tickets/fetchTicket', selectedTicket.value.ticketNumber);
+        selectedTicket.value = full;
+        await store.dispatch('tickets/fetchTickets');
+      } catch (e) { /* handled by store */ }
+      finally { releaseLoading.value = false; }
+    };
+
+    // ── Modal event bridge: from payment-detail-modal → sub-dialogs ──────
+    const onProcessPayment = (ticket) => {
+      selectedTicket.value = ticket;
+      openPayment(ticket);
+    };
+    const onHoldPayment = (ticket) => {
+      selectedTicket.value = ticket;
+      openHold();
+    };
+    const onReleaseHold = (ticket) => {
+      selectedTicket.value = ticket;
+      openRelease();
+    };
+
+    onMounted(async () => {
+      if (!allTickets.value.length)
+        await store.dispatch('tickets/fetchTickets').catch(() => {});
+      // NEW: Also fetch expenses to show pending ADVANCEs
+      if (!allExpenses.value.length)
+        await store.dispatch('expenses/fetchExpenses').catch(() => {});
+      console.log('TICKET SAMPLE:', allTickets.value[0]);
+    });
+
+    return {
+      smAndDown, canProcessPayments,
+      allTickets, filteredPayments, isLoading,
+      allExpenses, pendingAdvanceExpenses,
+      filterStatus, filterSearch, filterDateFrom, filterDateTo, filterQuick,
+      exportToCSV, STATUS_OPTIONS,
+      headers, getStatusColor, fd, fmt,
+      statCards, stats,
+      showDetail, detailLoading, selectedTicket, openDetail, closeDetail,
+      showPayment, paymentLoading, paymentForm, openPayment, submitPayment,
+      showHold, holdLoading, holdReason, openHold, submitHold,
+      showRelease, releaseLoading, releaseNotes, openRelease, submitRelease,
+      onProcessPayment, onHoldPayment, onReleaseHold, activeTab,
+    };
+  },
+
+  template: `
+  <div class="page-fade">
+    <v-container fluid class="pa-4 pa-md-6" :class="{ 'px-3': smAndDown }">
+
+      <!-- ── Page header ── -->
+      <div class="d-flex align-center mb-4">
+        <div>
+          <h1 class="text-h5 font-weight-bold mb-0">Payments</h1>
+          <p class="text-body-2 text-medium-emphasis mb-0">Track and process advance payments</p>
+        </div>
+        <v-spacer />
+        <v-btn variant="outlined" size="small" class="mr-2" prepend-icon="mdi-download"
+          @click="exportToCSV" :disabled="!filteredPayments.length">
+          Export CSV
+        </v-btn>
+        <v-btn icon variant="text" :loading="isLoading"
+          @click="$store.dispatch('tickets/fetchTickets')" title="Refresh">
+          <v-icon>mdi-refresh</v-icon>
+        </v-btn>
+      </div>
+
+      <!-- Quick Filter Chips -->
+      <div class="d-flex flex-wrap gap-2 mb-3">
+        <v-chip 
+          :color="filterQuick === '' ? 'primary' : 'default'" 
+          :variant="filterQuick === '' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = ''">
+          All
+        </v-chip>
+        <v-chip 
+          :color="filterQuick === 'partial' ? 'orange' : 'default'"
+          :variant="filterQuick === 'partial' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = 'partial'">
+          Partial Payment
+        </v-chip>
+        <v-chip 
+          :color="filterQuick === 'full' ? 'success' : 'default'"
+          :variant="filterQuick === 'full' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = 'full'">
+          Full Payment
+        </v-chip>
+        <v-chip 
+          :color="filterQuick === 'hold' ? 'error' : 'default'"
+          :variant="filterQuick === 'hold' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = 'hold'">
+          On Hold
+        </v-chip>
+      </div>
+
+      <!-- ── Filters ── -->
+      <v-card rounded="lg" elevation="0" border class="mb-4 pa-3">
+        <v-row dense align="center">
+          <v-col cols="12" sm="3">
+            <v-text-field v-model="filterSearch"
+              placeholder="Search ticket / ref / employee..."
+              density="compact" variant="outlined" hide-details
+              prepend-inner-icon="mdi-magnify" clearable />
+          </v-col>
+          <v-col cols="6" sm="2">
+            <v-select v-model="filterStatus"
+              :items="STATUS_OPTIONS"
+              item-title="title" item-value="value"
+              label="Status" density="compact" variant="outlined" hide-details clearable />
+          </v-col>
+          <v-col cols="6" sm="2">
+            <v-text-field v-model="filterDateFrom" type="date" label="From Date"
+              density="compact" variant="outlined" hide-details clearable />
+          </v-col>
+          <v-col cols="6" sm="2">
+            <v-text-field v-model="filterDateTo" type="date" label="To Date"
+              density="compact" variant="outlined" hide-details clearable />
+          </v-col>
+          <v-col cols="12" sm="1">
+            <v-btn variant="text" size="small" @click="filterSearch=''; filterStatus=''; filterDateFrom=''; filterDateTo=''; filterQuick=''" title="Clear filters">
+              <v-icon>mdi-filter-remove</v-icon>
+            </v-btn>
+          </v-col>
+        </v-row>
+      </v-card>
+
+      <!-- ── Tabs — Unified 2-tab structure ── -->
+      <v-tabs v-model="activeTab" color="primary" density="compact" class="mb-3">
+        <v-tab value="pending">
+          <v-icon size="16" start>mdi-clock-outline</v-icon>
+          Pending Payments
+          <v-chip v-if="stats.pending + pendingAdvanceExpenses.length" size="x-small" color="warning" variant="tonal" class="ml-1">
+            {{ stats.pending + pendingAdvanceExpenses.length }}
+          </v-chip>
+        </v-tab>
+        <v-tab value="all">
+          <v-icon size="16" start>mdi-view-list-outline</v-icon>
+          All Payments
+        </v-tab>
+      </v-tabs>
+
+      <v-window v-model="activeTab">
+        <v-window-item value="pending">
+          <!-- Desktop table / Mobile card view -->
+          <v-card v-if="!smAndDown" rounded="lg" elevation="0" border>
+            <v-data-table
+              :headers="headers"
+              :items="filteredPayments"
+              :loading="isLoading"
+              density="compact"
+              hover
+              no-data-text="No pending payments found"
+            >
+              <template #item.refNumber="{ item }">
+                <span class="font-weight-medium text-body-2">{{ item.refNumber }}</span>
+              </template>
+              <template #item.ticketNumber="{ item }">
+                <span class="text-body-2">{{ item.ticketNumber || '—' }}</span>
+              </template>
+              <template #item.expenseDate="{ item }">
+                <span class="text-caption">{{ fd(item.expenseDate) }}</span>
+              </template>
+              <template #item.amount="{ item }">
+                <span class="font-weight-medium">₹{{ fmt(item.amount) }}</span>
+              </template>
+              <template #item.paidAmount="{ item }">
+                <span class="text-success font-weight-medium">₹{{ fmt(item.paidAmount) }}</span>
+              </template>
+              <template #item.remaining="{ item }">
+                <span class="font-weight-medium" :class="(item.amount - item.paidAmount) > 0 ? 'text-warning' : 'text-success'">
+                  ₹{{ fmt((item.amount || 0) - (item.paidAmount || 0)) }}
+                </span>
+              </template>
+              <template #item.status="{ item }">
+                <v-chip size="x-small" :color="getStatusColor(item.status)" variant="tonal" label>
+                  {{ item.status === 'ADVANCE_PENDING' ? 'Advance (Ready)' : item.status }}
+                </v-chip>
+              </template>
+              <template #item.actions="{ item }">
+                <v-btn icon size="x-small" variant="text" @click="openDetail(item.raw)" title="View Details">
+                  <v-icon size="16">mdi-eye-outline</v-icon>
+                </v-btn>
+                <v-btn
+                  v-if="canProcessPayments && (item.status === 'ADVANCE_PENDING' || ['CREATED','PAYMENT_PARTIAL'].includes(item.status))"
+                  icon size="x-small" variant="text" color="success"
+                  @click.stop="() => { selectedTicket = item.raw; openPayment(item.raw); }"
+                  title="Pay">
+                  <v-icon size="16">mdi-cash-plus</v-icon>
+                </v-btn>
+              </template>
+            </v-data-table>
+          </v-card>
+
+          <div v-else class="pa-2">
+            <div v-if="isLoading" class="text-center pa-8">
+              <v-progress-circular indeterminate color="primary"/>
+            </div>
+            <template v-else>
+              <div v-if="!filteredPayments.length" class="text-center pa-8 text-medium-emphasis">
+                <v-icon size="40" class="mb-2">mdi-cash-outline</v-icon>
+                <div class="text-body-2">No pending payments found</div>
+              </div>
+              <v-card v-for="item in filteredPayments" :key="item.refNumber"
+                flat border rounded="xl" class="mb-2 pa-3 cursor-pointer"
+                @click="openDetail(item.raw)">
+                <div class="d-flex align-center justify-space-between mb-1">
+                  <span class="text-caption font-weight-bold" style="font-family:monospace">
+                    {{ item.refNumber }}
+                  </span>
+                  <v-chip :color="getStatusColor(item.status)"
+                    size="x-small" variant="tonal" label>
+                    {{ item.status === 'ADVANCE_PENDING' ? 'Advance (Ready)' : item.status }}
+                  </v-chip>
+                </div>
+                <div class="d-flex align-center justify-space-between">
+                  <span class="text-body-2 text-medium-emphasis">{{ item.ticketNumber || '—' }}</span>
+                  <span class="text-body-1 font-weight-bold">
+                    ₹{{ fmt(item.amount) }}
+                  </span>
+                </div>
+                <div class="d-flex align-center gap-2 mt-1">
+                  <span class="text-caption text-medium-emphasis">{{ fd(item.expenseDate) }}</span>
+                  <span class="text-caption" :class="(item.amount - item.paidAmount) > 0 ? 'text-warning' : 'text-success'">
+                    Pending: ₹{{ fmt((item.amount || 0) - (item.paidAmount || 0)) }}
+                  </span>
+                </div>
+              </v-card>
+            </template>
+          </div>
+        </v-window-item>
+
+        <v-window-item value="all">
+          <!-- Desktop table / Mobile card view -->
+          <v-card v-if="!smAndDown" rounded="lg" elevation="0" border>
+            <v-data-table
+              :headers="headers"
+              :items="filteredPayments"
+              :loading="isLoading"
+              density="compact"
+              hover
+              no-data-text="No payment records found"
+            >
+              <template #item.refNumber="{ item }">
+                <span class="font-weight-medium text-body-2">{{ item.refNumber }}</span>
+              </template>
+              <template #item.ticketNumber="{ item }">
+                <span class="text-body-2">{{ item.ticketNumber || '—' }}</span>
+              </template>
+              <template #item.expenseDate="{ item }">
+                <span class="text-caption">{{ fd(item.expenseDate) }}</span>
+              </template>
+              <template #item.amount="{ item }">
+                <span class="font-weight-medium">₹{{ fmt(item.amount) }}</span>
+              </template>
+              <template #item.paidAmount="{ item }">
+                <span class="text-success font-weight-medium">₹{{ fmt(item.paidAmount) }}</span>
+              </template>
+              <template #item.remaining="{ item }">
+                <span class="font-weight-medium" :class="(item.amount - item.paidAmount) > 0 ? 'text-warning' : 'text-success'">
+                  ₹{{ fmt((item.amount || 0) - (item.paidAmount || 0)) }}
+                </span>
+              </template>
+              <template #item.status="{ item }">
+                <v-chip size="x-small" :color="getStatusColor(item.status)" variant="tonal" label>
+                  {{ item.status === 'ADVANCE_PENDING' ? 'Advance (Ready)' : item.status }}
+                </v-chip>
+              </template>
+              <template #item.actions="{ item }">
+                <v-btn icon size="x-small" variant="text" @click="openDetail(item.raw)" title="View Details">
+                  <v-icon size="16">mdi-eye-outline</v-icon>
+                </v-btn>
+                <v-btn
+                  v-if="canProcessPayments && (item.status === 'ADVANCE_PENDING' || ['CREATED','PAYMENT_PARTIAL'].includes(item.status))"
+                  icon size="x-small" variant="text" color="success"
+                  @click.stop="() => { selectedTicket = item.raw; openPayment(item.raw); }"
+                  title="Pay">
+                  <v-icon size="16">mdi-cash-plus</v-icon>
+                </v-btn>
+              </template>
+            </v-data-table>
+          </v-card>
+
+          <div v-else class="pa-2">
+            <div v-if="isLoading" class="text-center pa-8">
+              <v-progress-circular indeterminate color="primary"/>
+            </div>
+            <template v-else>
+              <div v-if="!filteredPayments.length" class="text-center pa-8 text-medium-emphasis">
+                <v-icon size="40" class="mb-2">mdi-cash-outline</v-icon>
+                <div class="text-body-2">No payment records found</div>
+              </div>
+              <v-card v-for="item in filteredPayments" :key="item.refNumber"
+                flat border rounded="xl" class="mb-2 pa-3 cursor-pointer"
+                @click="openDetail(item.raw)">
+                <div class="d-flex align-center justify-space-between mb-1">
+                  <span class="text-caption font-weight-bold" style="font-family:monospace">
+                    {{ item.refNumber }}
+                  </span>
+                  <v-chip :color="getStatusColor(item.status)"
+                    size="x-small" variant="tonal" label>
+                    {{ item.status === 'ADVANCE_PENDING' ? 'Advance (Ready)' : item.status }}
+                  </v-chip>
+                </div>
+                <div class="d-flex align-center justify-space-between">
+                  <span class="text-body-2 text-medium-emphasis">{{ item.ticketNumber || '—' }}</span>
+                  <span class="text-body-1 font-weight-bold">
+                    ₹{{ fmt(item.amount) }}
+                  </span>
+                </div>
+                <div class="d-flex align-center gap-2 mt-1">
+                  <span class="text-caption text-medium-emphasis">{{ fd(item.expenseDate) }}</span>
+                  <span class="text-caption" :class="(item.amount - item.paidAmount) > 0 ? 'text-warning' : 'text-success'">
+                    Paid: ₹{{ fmt(item.paidAmount) }}
+                  </span>
+                </div>
+              </v-card>
+            </template>
+          </div>
+        </v-window-item>
+      </v-window>
+
+    </v-container>
+
+
+    <!-- ═══════════════════════════════════════════════════════════
+         PAYMENT DETAIL MODAL
+         ═══════════════════════════════════════════════════════════ -->
+    <payment-detail-modal
+      v-model="showDetail"
+      :ticket="selectedTicket"
+      :loading="detailLoading"
+      :can-process-payments="canProcessPayments"
+      @process-payment="onProcessPayment"
+      @hold-payment="onHoldPayment"
+      @release-hold="onReleaseHold"
+    />
+
+
+    <!-- ═══════════════════════════════════════════════════════════
+         PROCESS PAYMENT MODAL
+         ═══════════════════════════════════════════════════════════ -->
+    <v-dialog v-model="showPayment" max-width="480" scrollable class="bottom-sheet">
+      <v-card v-if="selectedTicket" rounded="xl">
+        <v-toolbar density="compact" color="surface" flat border="b" class="px-2">
+          <span class="text-caption text-medium-emphasis">
+            Process Payment
+          </span>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showPayment = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+
+        <v-card-text class="pa-4">
+
+          <!-- Ticket summary -->
+          <v-card rounded="lg" elevation="0" color="surface-variant" class="pa-3 mb-4">
+            <div class="d-flex justify-space-between mb-1">
+              <span class="text-caption text-medium-emphasis">Ticket</span>
+              <span class="text-body-2 font-weight-bold">{{ selectedTicket.ticketNumber }}</span>
+            </div>
+            <div class="d-flex justify-space-between mb-1">
+              <span class="text-caption text-medium-emphasis">Employee</span>
+              <span class="text-body-2">{{ selectedTicket.employeeName }}</span>
+            </div>
+            <v-divider class="my-2" />
+            <div class="d-flex justify-space-between mb-1">
+              <span class="text-caption text-medium-emphasis">Approved</span>
+              <span class="text-body-2 font-weight-bold text-primary">
+                ₹{{ fmt(selectedTicket.amount) }}
+              </span>
+            </div>
+            <div class="d-flex justify-space-between mb-1">
+              <span class="text-caption text-medium-emphasis">Already Paid</span>
+              <span class="text-body-2 text-success">₹{{ fmt(selectedTicket.paidAmount) }}</span>
+            </div>
+            <div class="d-flex justify-space-between">
+              <span class="text-caption text-medium-emphasis">Remaining</span>
+              <span class="text-body-2 font-weight-bold text-warning">
+                ₹{{ fmt((selectedTicket.amount || 0) - (selectedTicket.paidAmount || 0)) }}
+              </span>
+            </div>
+          </v-card>
+
+          <!-- Payment form -->
+          <v-row dense>
+            <v-col cols="12">
+              <v-text-field v-model.number="paymentForm.amount"
+                label="Amount to Pay (₹) *"
+                type="number" density="compact" variant="outlined" prefix="₹"
+                :hint="'Max remaining: ₹' + fmt((selectedTicket.amount||0)-(selectedTicket.paidAmount||0))"
+                persistent-hint />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-select v-model="paymentForm.paymentMode"
+                :items="['CASH','CHEQUE','NEFT','RTGS','UPI','OTHER']"
+                label="Payment Mode *" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-text-field v-model="paymentForm.paymentDate"
+                label="Payment Date *" type="date" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-text-field v-model="paymentForm.billDate"
+                label="Bill Date" type="date" density="compact" variant="outlined"
+                hint="Date on the physical bill" persistent-hint />
+            </v-col>
+            <v-col cols="12">
+              <v-text-field v-model="paymentForm.transactionRef"
+                label="Transaction / Cheque Reference"
+                density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12">
+              <v-textarea v-model="paymentForm.notes"
+                label="Remarks (optional)"
+                density="compact" variant="outlined" rows="2" auto-grow />
+            </v-col>
+          </v-row>
+
+          <!-- Partial payment info note -->
+          <v-alert
+            v-if="paymentForm.amount && paymentForm.amount < ((selectedTicket.amount||0)-(selectedTicket.paidAmount||0))"
+            type="info" variant="tonal" density="compact" class="mt-2">
+            This will be recorded as a <strong>partial payment</strong>.
+            The ticket will remain open until the full amount is paid.
+          </v-alert>
+          <v-alert
+            v-else-if="paymentForm.amount && paymentForm.amount >= ((selectedTicket.amount||0)-(selectedTicket.paidAmount||0))"
+            type="success" variant="tonal" density="compact" class="mt-2">
+            This will mark the payment as <strong>complete</strong>.
+          </v-alert>
+
+        </v-card-text>
+
+        <v-card-actions class="pa-3 border-t">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showPayment = false">Cancel</v-btn>
+          <v-btn color="teal-darken-1" variant="flat" size="small" rounded="lg"
+            :loading="paymentLoading"
+            :disabled="!paymentForm.amount || paymentForm.amount <= 0"
+            prepend-icon="mdi-check"
+            @click="submitPayment">
+            Submit Payment
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+
+    <!-- ═══════════════════════════════════════════════════════════
+         HOLD PAYMENT MODAL
+         ═══════════════════════════════════════════════════════════ -->
+    <v-dialog v-model="showHold" max-width="440" class="bottom-sheet">
+      <v-card v-if="selectedTicket" rounded="xl">
+        <v-toolbar density="compact" color="warning" class="px-2">
+          <v-icon class="mr-2">mdi-pause-circle</v-icon>
+          <v-toolbar-title class="text-body-1 font-weight-bold">Place Payment on Hold</v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showHold = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+        <v-card-text class="pa-4">
+          <p class="text-body-2 mb-3">
+            <strong>{{ selectedTicket.ticketNumber }}</strong> ·
+            {{ selectedTicket.employeeName }}
+          </p>
+          <v-textarea v-model="holdReason"
+            label="Reason for Hold *"
+            density="compact" variant="outlined" rows="3" auto-grow
+            placeholder="Explain why the payment is being placed on hold" />
+        </v-card-text>
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showHold = false">Cancel</v-btn>
+          <v-btn color="warning" variant="flat" size="small" rounded="lg"
+            :loading="holdLoading"
+            :disabled="!holdReason.trim()"
+            @click="submitHold">
+            Confirm Hold
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+
+    <!-- ═══════════════════════════════════════════════════════════
+         RELEASE HOLD MODAL
+         ═══════════════════════════════════════════════════════════ -->
+    <v-dialog v-model="showRelease" max-width="440" class="bottom-sheet">
+      <v-card v-if="selectedTicket" rounded="xl">
+        <v-toolbar density="compact" color="success" class="px-2">
+          <v-icon class="mr-2">mdi-play-circle</v-icon>
+          <v-toolbar-title class="text-body-1 font-weight-bold">Release Payment Hold</v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showRelease = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+        <v-card-text class="pa-4">
+          <p class="text-body-2 mb-3">
+            <strong>{{ selectedTicket.ticketNumber }}</strong> ·
+            {{ selectedTicket.employeeName }}
+          </p>
+          <v-alert v-if="selectedTicket.remarksFromAccounts"
+            type="warning" variant="tonal" density="compact" class="mb-3">
+            <div class="text-caption font-weight-bold">Current Hold Reason:</div>
+            <div class="text-caption">{{ selectedTicket.remarksFromAccounts }}</div>
+          </v-alert>
+          <v-textarea v-model="releaseNotes"
+            label="Release Notes (optional)"
+            density="compact" variant="outlined" rows="2" auto-grow />
+        </v-card-text>
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showRelease = false">Cancel</v-btn>
+          <v-btn color="success" variant="flat" size="small" rounded="lg"
+            :loading="releaseLoading"
+            @click="submitRelease">
+            Release Hold
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+
+  </div>`
+};
+
+console.log('✅ PaymentView loaded');
+console.log('✅ Global component registered: payment-detail-modal');
+
+</script>

@@ -1,0 +1,778 @@
+<script>
+const { createStore } = Vuex;
+
+// Utils is defined in utils.html — no duplication here
+
+// ═══════════════════════════════════════════════════════════════
+//  AUTH MODULE
+// ═══════════════════════════════════════════════════════════════
+const authModule = {
+  namespaced: true,
+  state: () => ({ user: null, isAuthenticated: false }),
+  getters: {
+    user:            s => s.user,
+    isAuth:          s => s.isAuthenticated,
+    userRole:        s => s.user?.role        || null,
+    userName:        s => s.user?.name        || '',
+    userEmail:       s => s.user?.email       || '',
+    userJobTitle:    s => s.user?.jobTitle    || '',
+    userDepartment:  s => s.user?.department  || '',
+    userReportsTo:   s => s.user?.reportsTo   || '',
+    userManagerName: s => s.user?.managerName || '',
+    userDistrict:    s => s.user?.district    || '',
+    userProject:     s => s.user?.project     || '',
+    userLevel:       s => s.user?.level       || '',
+    userID:          s => s.user?.UserID      || s.user?.email || '',
+    isAdmin:         s => (s.user?.role || '') === 'admin',
+    isEmployee:      s => (s.user?.role || '') === 'employee',
+    isManager:       s => (s.user?.role || '') === 'manager',
+    isOperationHead: s => ['admin', 'operation_head'].includes(s.user?.role || ''),
+    isAccounts:      s => ['admin', 'accounts'].includes(s.user?.role || ''),
+    canApprove:      s => ['admin', 'operation_head'].includes(s.user?.role || ''),
+    canProcessPayments: s => ['admin', 'accounts'].includes(s.user?.role || ''),
+  },
+  mutations: {
+    SET_USER(state, user)  { state.user = user; state.isAuthenticated = !!user; },
+    CLEAR_USER(state)      { state.user = null; state.isAuthenticated = false; },
+  },
+  actions: {
+    async login({ commit, dispatch }, { email, password, token }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const params = token ? { token } : { email, password };
+        const result = await Utils.request('login', params);
+        const freshToken = result.token || token;
+        if (freshToken) Utils.setToken(freshToken);
+        commit('SET_USER', result.user);
+        if (!token) {
+          dispatch('ui/showSnackbar', { message: `Welcome back, ${result.user.name}!`, color: 'success' }, { root: true });
+        }
+        // Pre-load data for the logged-in user's role
+        dispatch('users/fetchUsers',    null, { root: true });
+        dispatch('expenses/fetchExpenses', null, { root: true });
+        dispatch('tickets/fetchTickets',   null, { root: true });
+        return { success: true, user: result.user };
+      } catch (error) {
+        if (!token) dispatch('ui/showSnackbar', { message: error.message, color: 'error' }, { root: true });
+        throw error;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    async logout({ commit, dispatch }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        await Utils.request('logout', { token: Utils.getToken() });
+        Utils.setToken('');
+        commit('CLEAR_USER');
+        commit('expenses/CLEAR',      null, { root: true });
+        commit('tickets/CLEAR',       null, { root: true });
+        commit('users/SET_USERS', [], { root: true });
+        dispatch('ui/showSnackbar', { message: 'Logged out successfully', color: 'success' }, { root: true });
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  UI MODULE
+// ═══════════════════════════════════════════════════════════════
+const uiModule = {
+  namespaced: true,
+  state: () => ({
+    loading: false,
+    snackbar: { show: false, message: '', color: 'primary', timeout: 3500 }
+  }),
+  getters: {
+    loading:  s => s.loading,
+    snackbar: s => s.snackbar,
+  },
+  mutations: {
+    SET_LOADING(state, v)  { state.loading = v; },
+    SET_SNACKBAR(state, p) { state.snackbar = { show: true, message: '', color: 'primary', timeout: 3500, ...p }; },
+    CLOSE_SNACKBAR(state)  { state.snackbar.show = false; },
+  },
+  actions: {
+    startLoading({ commit })          { commit('SET_LOADING', true); },
+    stopLoading({ commit })           { commit('SET_LOADING', false); },
+    showSnackbar({ commit }, payload) { commit('SET_SNACKBAR', payload); },
+    closeSnackbar({ commit })         { commit('CLOSE_SNACKBAR'); },
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  USERS MODULE  (shared lookup across all modules)
+// ═══════════════════════════════════════════════════════════════
+const usersModule = {
+  namespaced: true,
+  state: () => ({ allUsers: [], loading: false, error: null }),
+  getters: {
+    allUsers:        s => s.allUsers,
+    isLoading:       s => s.loading,
+    getUserByEmail:  s => email => s.allUsers.find(u => (u.email || '').toLowerCase() === (email || '').toLowerCase()),
+    getUserById:     s => id    => s.allUsers.find(u => u.UserID === id || u.email === id),
+    managerUsers:    s => s.allUsers.filter(u => ['manager', 'operation_head', 'admin'].includes(u.role || '')),
+    accountsUsers:   s => s.allUsers.filter(u => ['accounts', 'admin'].includes(u.role || '')),
+    employeeUsers:   s => s.allUsers.filter(u => (u.role || '') === 'employee'),
+  },
+  mutations: {
+    SET_USERS(state, users) { state.allUsers = users; },
+    SET_LOADING(state, v)   { state.loading = v; },
+    SET_ERROR(state, err)   { state.error = err; },
+  },
+  actions: {
+    async fetchUsers({ commit }) {
+      try {
+        commit('SET_LOADING', true);
+        const result = await Utils.request('getUsers', { token: Utils.getToken() });
+        commit('SET_USERS', Array.isArray(result) ? result : (result.users || []));
+      } catch (e) {
+        commit('SET_ERROR', e.message);
+        console.error('Users fetch error:', e);
+      } finally {
+        commit('SET_LOADING', false);
+      }
+    },
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  EXPENSES MODULE
+// ═══════════════════════════════════════════════════════════════
+const expensesModule = {
+  namespaced: true,
+  state: () => ({
+    expenses:     [],    // all expenses visible to the current user
+    selected:     null,  // currently viewed expense detail
+    stats:        null,
+    loading:      false,
+    error:        null,
+    filters: {
+      expenseStatus: '',
+      expenseType:   '',
+      currentStage:  '',
+      ticketStatus:  ''
+    }
+  }),
+  getters: {
+    all:          s => s.expenses,
+    selected:     s => s.selected,
+    stats:        s => s.stats,
+    isLoading:    s => s.loading,
+    error:        s => s.error,
+    filters:      s => s.filters,
+
+    // Convenience filtered views
+    submitted:    s => s.expenses.filter(e => e.expenseStatus === 'SUBMITTED'),
+    approved:     s => s.expenses.filter(e => e.expenseStatus === 'APPROVED'),
+    rejected:     s => s.expenses.filter(e => e.expenseStatus === 'REJECTED'),
+    cancelled:    s => s.expenses.filter(e => e.expenseStatus === 'CANCELLED'),
+    advances:     s => s.expenses.filter(e => e.expenseType === 'ADVANCE'),
+    reimbursements: s => s.expenses.filter(e => e.expenseType === 'REIMBURSEMENT'),
+    pendingAtManager: s => s.expenses.filter(e => e.expenseStatus === 'SUBMITTED' && e.currentStage === 'MANAGER'),
+    pendingAtOpHead:  s => s.expenses.filter(e => e.expenseStatus === 'SUBMITTED' && e.currentStage === 'OP_HEAD'),
+  },
+  mutations: {
+    SET_EXPENSES(state, list)     { state.expenses = list; state.error = null; },
+    ADD_EXPENSE(state, exp)       { state.expenses.unshift(exp); },
+    UPDATE_EXPENSE(state, updated) {
+      const i = state.expenses.findIndex(e => e.referenceNumber === updated.referenceNumber);
+      if (i !== -1) state.expenses[i] = { ...state.expenses[i], ...updated };
+      if (state.selected?.referenceNumber === updated.referenceNumber) state.selected = { ...state.selected, ...updated };
+    },
+    SET_SELECTED(state, exp)      { state.selected = exp; },
+    SET_STATS(state, stats)       { state.stats = stats; },
+    SET_LOADING(state, v)         { state.loading = v; },
+    SET_ERROR(state, msg)         { state.error = msg; },
+    SET_FILTERS(state, f)         { state.filters = { ...state.filters, ...f }; },
+    CLEAR(state) {
+      state.expenses = []; state.selected = null; state.stats = null; state.error = null;
+    },
+  },
+  actions: {
+    // ── FETCH LIST ───────────────────────────────────────────
+    async fetchExpenses({ commit, state }) {
+      try {
+        commit('SET_LOADING', true);
+        const result = await Utils.request('getUserExpenses', {
+          token:   Utils.getToken(),
+          filters: state.filters
+        });
+        commit('SET_EXPENSES', Array.isArray(result) ? result : []);
+      } catch (e) {
+        commit('SET_ERROR', e.message);
+        console.error('fetchExpenses error:', e);
+      } finally {
+        commit('SET_LOADING', false);
+      }
+    },
+
+    // ── FETCH SINGLE ────────────────────────────────────────
+    async fetchExpense({ commit, dispatch }, referenceNumber) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('getExpense', { token: Utils.getToken(), referenceNumber });
+        commit('SET_SELECTED', result);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── CREATE ──────────────────────────────────────────────
+    async createExpense({ commit, dispatch }, expenseData) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('createExpense', { token: Utils.getToken(), ...expenseData });
+        dispatch('ui/showSnackbar', { message: 'Expense submitted. Ref: ' + result.referenceNumber, color: 'success' }, { root: true });
+        await dispatch('fetchExpenses');
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── FORWARD (Manager → Op Head) ─────────────────────────
+    async forwardExpense({ commit, dispatch }, { referenceNumber, managerNotes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('forwardExpenseToOpHead', { token: Utils.getToken(), referenceNumber, managerNotes });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'success' }, { root: true });
+        await dispatch('fetchExpense', referenceNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── APPROVE ─────────────────────────────────────────────
+    async approveExpense({ commit, dispatch }, { referenceNumber, approvedItems, notes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('approveExpense', {
+          token: Utils.getToken(),
+          referenceNumber,
+          approvedItems: approvedItems || [],  // ✅ Forward items
+          approverNotes: notes || ''  // ✅ Forward notes
+        });
+        dispatch('ui/showSnackbar', { message: result.message + ' Ticket: ' + result.ticketNumber, color: 'success' }, { root: true });
+        await dispatch('fetchExpense', referenceNumber);
+        // Refresh tickets since a new one was created
+        dispatch('tickets/fetchTickets', null, { root: true });
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    async processExpensePayment({ commit, dispatch }, { referenceNumber, amount, paymentMode, transactionRef, paymentDate, notes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('processExpensePayment', {
+          token: Utils.getToken(),
+          referenceNumber,
+          amount,
+          paymentMethod: paymentMode,
+          reference: transactionRef,
+          paymentDate,
+          notes
+        });
+        dispatch('ui/showSnackbar', { 
+          message: result.message, 
+          color: 'success' 
+        }, { root: true });
+        
+        // Refresh the expense to get updated payment data
+        await dispatch('fetchExpense', referenceNumber);
+        
+        // Refresh tickets list to get newly created ticket
+        dispatch('tickets/fetchTickets', null, { root: true });
+        
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── REJECT ──────────────────────────────────────────────
+    async rejectExpense({ commit, dispatch }, { referenceNumber, reason }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('rejectExpense', { token: Utils.getToken(), referenceNumber, reason });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'error' }, { root: true });
+        await dispatch('fetchExpense', referenceNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── CANCEL ──────────────────────────────────────────────
+    async cancelExpense({ commit, dispatch }, { referenceNumber, reason }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('cancelExpense', { token: Utils.getToken(), referenceNumber, reason });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'warning' }, { root: true });
+        await dispatch('fetchExpense', referenceNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── NEW: HOLD EXPENSE ───────────────────────────────────
+    async holdExpense({ dispatch }, { referenceNumber, reason }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('holdExpense', {
+          token: Utils.getToken(),
+          referenceNumber,
+          reason
+        });
+        dispatch('fetchExpenses');
+        dispatch('ui/showSnackbar', {
+          message: 'Expense put on hold',
+          color: 'warning'
+        }, { root: true });
+        return result;
+      } catch (error) {
+        dispatch('ui/showSnackbar', {
+          message: error.message,
+          color: 'error'
+        }, { root: true });
+        throw error;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── NEW: RELEASE EXPENSE HOLD ───────────────────────────
+    async releaseExpenseHold({ dispatch }, { referenceNumber }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('releaseExpenseHold', {
+          token: Utils.getToken(),
+          referenceNumber
+        });
+        dispatch('fetchExpenses');
+        dispatch('ui/showSnackbar', {
+          message: 'Hold released successfully',
+          color: 'success'
+        }, { root: true });
+        return result;
+      } catch (error) {
+        dispatch('ui/showSnackbar', {
+          message: error.message,
+          color: 'error'
+        }, { root: true });
+        throw error;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── NEW: RESUBMIT EXPENSE ───────────────────────────────
+    async resubmitExpense({ dispatch }, { referenceNumber, expenseItems }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('resubmitExpense', {
+          token: Utils.getToken(),
+          referenceNumber,
+          expenseItems
+        });
+        dispatch('fetchExpenses');
+        dispatch('ui/showSnackbar', {
+          message: 'Expense resubmitted successfully',
+          color: 'success'
+        }, { root: true });
+        return result;
+      } catch (error) {
+        dispatch('ui/showSnackbar', {
+          message: error.message,
+          color: 'error'
+        }, { root: true });
+        throw error;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── FILTERS ─────────────────────────────────────────────
+    setFilters({ commit, dispatch }, filters) {
+      commit('SET_FILTERS', filters);
+      dispatch('fetchExpenses');
+    },
+
+    clearSelected({ commit }) { commit('SET_SELECTED', null); },
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  TICKETS MODULE
+// ═══════════════════════════════════════════════════════════════
+const ticketsModule = {
+  namespaced: true,
+  state: () => ({
+    tickets:        [],
+    selected:       null,
+    dashboard:      null,
+    reconciliation: null,
+    loading:        false,
+    error:          null,
+    filters: {
+      ticketStatus: '',
+      expenseType:  ''
+    }
+  }),
+  getters: {
+    all:             s => s.tickets,
+    selected:        s => s.selected,
+    dashboard:       s => s.dashboard,
+    reconciliation:  s => s.reconciliation,
+    isLoading:       s => s.loading,
+    error:           s => s.error,
+    filters:         s => s.filters,
+
+    // Convenience filtered views
+    pending:         s => s.tickets.filter(t => ['PENDING', 'BILLS_SUBMITTED', 'VERIFIED'].includes(t.ticketStatus)),
+    closed:          s => s.tickets.filter(t => ['CLOSED', 'CANCELLED', 'REIMBURSED_CLOSED'].includes(t.ticketStatus)),
+    advances:        s => s.tickets.filter(t => t.expenseType === 'ADVANCE'),
+    reimbursements:  s => s.tickets.filter(t => t.expenseType === 'REIMBURSEMENT'),
+    awaitingBills:   s => s.tickets.filter(t => t.ticketStatus === 'PENDING'),
+    billsSubmitted:  s => s.tickets.filter(t => t.ticketStatus === 'BILLS_SUBMITTED'),
+  },
+  mutations: {
+    SET_TICKETS(state, list)      { state.tickets = list; state.error = null; },
+    ADD_TICKET(state, ticket)     { state.tickets.unshift(ticket); },
+    UPDATE_TICKET(state, updated) {
+      const i = state.tickets.findIndex(t => t.ticketNumber === updated.ticketNumber);
+      if (i !== -1) state.tickets[i] = { ...state.tickets[i], ...updated };
+      if (state.selected?.ticketNumber === updated.ticketNumber) state.selected = { ...state.selected, ...updated };
+    },
+    SET_SELECTED(state, ticket)   { state.selected = ticket; },
+    SET_DASHBOARD(state, data)    { state.dashboard = data; },
+    SET_RECONCILIATION(state, data) { state.reconciliation = data; },
+    SET_LOADING(state, v)         { state.loading = v; },
+    SET_ERROR(state, msg)         { state.error = msg; },
+    SET_FILTERS(state, f)         { state.filters = { ...state.filters, ...f }; },
+    CLEAR(state) {
+      state.tickets = []; state.selected = null; state.dashboard = null; state.reconciliation = null; state.error = null;
+    },
+  },
+  actions: {
+    // ── FETCH LIST ───────────────────────────────────────────
+    async fetchTickets({ commit, state, dispatch }) {
+      try {
+        commit('SET_LOADING', true);
+        const result = await Utils.request('getTickets', {
+          token:   Utils.getToken(),
+          filters: state.filters
+        });
+        commit('SET_TICKETS', Array.isArray(result) ? result : []);
+      } catch (e) {
+        commit('SET_ERROR', e.message);
+        console.error('fetchTickets error:', e);
+      } finally {
+        commit('SET_LOADING', false);
+      }
+    },
+
+    // ── FETCH SINGLE ────────────────────────────────────────
+    async fetchTicket({ commit, dispatch }, ticketNumber) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('getTicketDetail', { token: Utils.getToken(), ticketNumber });
+        commit('SET_SELECTED', result);
+        return result;
+      } catch (e) {
+        console.warn('Ticket not found:', ticketNumber);
+        return null;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── SUBMIT BILLS ────────────────────────────────────────
+    async submitBills({ commit, dispatch }, { ticketNumber, items, courierNumber, courierType, attachments }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('submitBills', {
+          token: Utils.getToken(), ticketNumber, items, courierNumber, courierType, attachments
+        });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'success' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── APPROVE BILLS ────────────────────────────────────────
+    async approveBills({ commit, dispatch }, { ticketNumber, notes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('approveBills', { token: Utils.getToken(), ticketNumber, notes });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'success' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── REQUEST BILL CORRECTION ──────────────────────────────
+    async requestBillCorrections({ commit, dispatch }, { ticketNumber, corrections }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('requestBillCorrections', { token: Utils.getToken(), ticketNumber, corrections });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'warning' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── REJECT BILLS ─────────────────────────────────────────
+    async rejectBills({ commit, dispatch }, { ticketNumber, reason }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('rejectBills', { token: Utils.getToken(), ticketNumber, reason });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'error' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── CLOSE TICKET (accounts) ──────────────────────────────
+    async closeTicket({ commit, dispatch }, { ticketNumber, notes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('closeTicket', { token: Utils.getToken(), ticketNumber, notes });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'success' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── ADMIN: FORCE CLOSE ───────────────────────────────────
+    async forceCloseTicket({ commit, dispatch }, { ticketNumber, reason }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('forceCloseTicket', { token: Utils.getToken(), ticketNumber, reason });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'warning' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── ADMIN: WAIVE BILL ────────────────────────────────────
+    async adminWaiveBill({ commit, dispatch }, { ticketNumber, notes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('adminWaiveBill', { token: Utils.getToken(), ticketNumber, notes });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'info' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── ACCOUNTS DASHBOARD ───────────────────────────────────
+    async fetchDashboard({ commit, dispatch }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('getAccountsDashboard', { token: Utils.getToken() });
+        commit('SET_DASHBOARD', result);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── RECONCILIATION ───────────────────────────────────────
+    async fetchReconciliation({ commit, dispatch }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('getPaymentReconciliation', { token: Utils.getToken() });
+        commit('SET_RECONCILIATION', result);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── AUDIT TRAIL ──────────────────────────────────────────
+    async fetchAuditTrail({ dispatch }, ticketNumber) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        return await Utils.request('getTicketAuditTrail', { token: Utils.getToken(), ticketNumber });
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── PROCESS PAYMENT ─────────────────────────────────────
+    async processPayment({ commit, dispatch }, { ticketNumber, amount, paymentMode, transactionRef, paymentDate, billDate, notes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('processPayment', {
+          token: Utils.getToken(),
+          ticketNumber,
+          amount,
+          paymentMode,
+          transactionRef,
+          paymentDate,
+          billDate,
+          notes
+        });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'success' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── HOLD PAYMENT ─────────────────────────────────────────
+    async holdPayment({ commit, dispatch }, { ticketNumber, holdReason }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('holdPayment', {
+          token: Utils.getToken(),
+          ticketNumber,
+          holdReason
+        });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'warning' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── RELEASE PAYMENT HOLD ────────────────────────────────
+    async releasePaymentHold({ commit, dispatch }, { ticketNumber, releaseNotes }) {
+      try {
+        dispatch('ui/startLoading', null, { root: true });
+        const result = await Utils.request('releasePaymentHold', {
+          token: Utils.getToken(),
+          ticketNumber,
+          releaseNotes
+        });
+        dispatch('ui/showSnackbar', { message: result.message, color: 'success' }, { root: true });
+        await dispatch('fetchTicket', ticketNumber);
+        return result;
+      } catch (e) {
+        dispatch('ui/showSnackbar', { message: e.message, color: 'error' }, { root: true });
+        throw e;
+      } finally {
+        dispatch('ui/stopLoading', null, { root: true });
+      }
+    },
+
+    // ── FILTERS ──────────────────────────────────────────────
+    setFilters({ commit, dispatch }, filters) {
+      commit('SET_FILTERS', filters);
+      dispatch('fetchTickets');
+    },
+
+    clearSelected({ commit }) { commit('SET_SELECTED', null); },
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  ROOT STORE
+// ═══════════════════════════════════════════════════════════════
+var store = createStore({
+  modules: {
+    auth:          authModule,
+    ui:            uiModule,
+    users:         usersModule,
+    expenses:      expensesModule,
+    tickets:       ticketsModule,
+  },
+  state: () => ({
+    appName:  'Expense Management System',
+    appTitle: 'Cradle Life Sciences Pvt Ltd'
+  }),
+  getters: {
+    appName:  s => s.appName,
+    appTitle: s => s.appTitle,
+  },
+});
+
+// ── Global Vuex destructuring ─────────────────────────────────
+const { useStore } = Vuex;
+
+console.log('✅ EMS Vuex 4 store initialized — modules: auth, ui, users, expenses, tickets (with hold/release/resubmit support)');
+</script>

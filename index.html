@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/@mdi/font@7.x/css/materialdesignicons.min.css" rel="stylesheet">
+    <base target="_top">
+    <style>
+      /* ── Reset ── */
+      html, body { margin: 0; padding: 0; height: 100%; }
+
+      /* ── Font ── */
+      body, .v-application {
+        font-family: 'DM Sans', system-ui, -apple-system, sans-serif !important;
+      }
+
+      /* ── Buttons: kill uppercase & tracking — Vuetify default is uppercase which looks dated ── */
+      .v-btn { text-transform: none !important; letter-spacing: 0 !important; }
+      .v-tab { text-transform: none !important; letter-spacing: 0 !important; }
+
+      /* ── Tables ── */
+      .v-data-table { background: transparent !important; }
+      .v-data-table thead th {
+        font-size:      11px !important;
+        font-weight:    600  !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.06em !important;
+        color: rgba(var(--v-theme-on-surface), 0.5) !important;
+      }
+
+      /* ── Global scrollbar ── */
+      ::-webkit-scrollbar       { width: 4px; height: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: rgba(0,0,0,.12); border-radius: 10px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,.22); }
+
+      /* ── Stat cards (dashboard only) ── */
+      .stat-card {
+        transition: box-shadow 0.2s ease, transform 0.2s ease !important;
+      }
+      .stat-card:hover {
+        box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
+        transform: translateY(-1px);
+      }
+
+      /* ── Page fade animation ── */
+      .page-fade { animation: pageFade 0.2s ease; }
+      @keyframes pageFade {
+        from { opacity: 0; transform: translateY(4px); }
+        to   { opacity: 1; transform: none; }
+      }
+
+      /* ══════════════════════════════════════════════════════
+         TASKFLOW UI REDESIGN — style additions
+         ══════════════════════════════════════════════════════ */
+
+      /* ── Nav item tighter ── */
+      .v-navigation-drawer .v-list-item {
+        min-height: 36px !important;
+      }
+
+      /* ── Table rows — slight breathing room ── */
+      .v-data-table tbody .v-data-table__tr td {
+        padding-top: 10px !important;
+        padding-bottom: 10px !important;
+      }
+
+      /* ── DIALOG SYSTEM FIX — prevents off-screen overflow ── */
+
+      /* Safe margin on all screen sizes */
+      .v-dialog > .v-overlay__content {
+        margin: 12px !important;
+        max-height: calc(100vh - 24px) !important;
+      }
+
+      /* Mobile: full-width with edge margin */
+      @media (max-width: 600px) {
+        .v-dialog > .v-overlay__content {
+          margin: 8px !important;
+          max-width: calc(100vw - 16px) !important;
+          max-height: calc(100vh - 16px) !important;
+        }
+      }
+
+      /* Dialog card uses flexbox so toolbar/footer never scroll */
+      .v-dialog .v-card {
+        display: flex;
+        flex-direction: column;
+        max-height: 100%;
+      }
+
+      /* Prevent card overflow when scrollable is set */
+      .v-dialog[data-scrollable] > .v-overlay__content > .v-card,
+      .v-dialog > .v-overlay__content > .v-card {
+        overflow: hidden;
+      }
+
+      /* Toolbar and footer are fixed height, content area scrolls */
+      .v-dialog .v-toolbar      { flex-shrink: 0; }
+      .v-dialog .v-card-text    { overflow-y: auto; flex: 1 1 auto; }
+      .v-dialog .v-card-actions { flex-shrink: 0; }
+
+      /* Consistent dialog toolbar height */
+      .v-dialog .v-toolbar {
+        min-height: 48px !important;
+      }
+
+      /* Menus and datepickers inside dialogs must float above */
+      .v-menu > .v-overlay__content { z-index: 2400 !important; }
+      .v-date-picker                { z-index: 2400 !important; }
+
+      /* Date input styling */
+      input[type="date"]::-webkit-calendar-picker-indicator {
+        cursor: pointer;
+        opacity: 0.7;
+      }
+
+      /* ── Section labels (form & modal headers) ── */
+      .section-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+        color: rgba(var(--v-theme-on-surface), .4);
+        margin-bottom: 10px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(var(--v-border-color), .1);
+      }
+
+      /* ── Detail row (label + value pairs in modals) ── */
+      .detail-label {
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+        color: rgba(var(--v-theme-on-surface), .4);
+        margin-bottom: 2px;
+      }
+      .detail-val {
+        font-size: 13px;
+        font-weight: 500;
+        color: rgba(var(--v-theme-on-surface), .87);
+        line-height: 1.4;
+      }
+
+      /* ── Info surface (subtle tinted background for grouped info) ── */
+      .info-surface {
+        background: rgba(var(--v-theme-primary), .04);
+        border: 1px solid rgba(var(--v-theme-primary), .10);
+        border-radius: 10px;
+        padding: 12px 14px;
+      }
+
+      /* ── Amount display (large currency figure in modals) ── */
+      .amount-display {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: -.02em;
+        line-height: 1.2;
+      }
+
+      /* ── Mobile bottom sheet dialog ── */
+      @media (max-width: 600px) {
+        .v-dialog.bottom-sheet > .v-overlay__content {
+          margin: 0 !important;
+          max-width: 100vw !important;
+          max-height: 92vh !important;
+          position: fixed !important;
+          bottom: 0 !important;
+          left: 0 !important;
+          right: 0 !important;
+          border-radius: 20px 20px 0 0 !important;
+        }
+        .v-dialog.bottom-sheet .v-card {
+          border-radius: 20px 20px 0 0 !important;
+        }
+      }
+
+      /* ── Form add-item row ── */
+      .add-item-row {
+        background: rgba(var(--v-theme-primary), .03);
+        border: 1.5px dashed rgba(var(--v-border-color), .25);
+        border-radius: 12px;
+        padding: 12px;
+      }
+
+      /* ── Status pill (compact, no label clutter) ── */
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      /* ── Timeline clean ── */
+      .v-timeline-item .v-timeline-item__body {
+        padding-bottom: 8px !important;
+      }
+
+      /* ── Sticky modal actions on mobile ── */
+      @media (max-width: 600px) {
+        .v-dialog .v-card-actions {
+          position: sticky;
+          bottom: 0;
+          background: rgb(var(--v-theme-surface));
+          border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+          z-index: 10;
+        }
+      }
+
+    /* ── Mobile bottom padding for v-main ── */
+    @media (max-width: 960px) {
+      .v-main { padding-bottom: 64px !important; }
+    }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <v-app>
+        <my-snackbar></my-snackbar>
+        <my-navbar></my-navbar>
+        <v-main>
+          <router-view></router-view>
+        </v-main>
+      </v-app>
+    </div>
+    <?!= include_("vue-index.html"); ?>
+  </body>
+</html>

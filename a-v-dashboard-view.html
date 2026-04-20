@@ -1,0 +1,301 @@
+<script>
+    // ═══════════════════════════════════════════════════════════════════════════
+// 2. DASHBOARD VIEW
+// ═══════════════════════════════════════════════════════════════════════════
+const DashboardView = {
+  name: 'DashboardView',
+  setup() {
+    const store  = useStore();
+    const router = useRouter();
+    const { mdAndDown } = useDisplay();
+
+    const userName  = computed(() => store.getters['auth/userName']);
+    const userRole  = computed(() => store.getters['auth/userRole']);
+    const isAdmin   = computed(() => (userRole.value || '').toLowerCase() === 'admin');
+    const isAccounts= computed(() => ['admin', 'accounts'].includes((userRole.value || '').toLowerCase()));
+    const isEmployee= computed(() => (userRole.value || '').toLowerCase() === 'employee');
+
+    const userInitials = computed(() => {
+      const name = userName.value || '';
+      if (!name) return '?';
+      const parts = name.trim().split(/\s+/);
+      return (parts.length >= 2
+        ? parts[0][0] + parts[parts.length - 1][0]
+        : name.substring(0, 2)).toUpperCase();
+    });
+
+    const userRoleBadge = computed(() => ({
+      'admin':           'error',
+      'operation head':  'deep-purple',
+      'senior manager':  'purple',
+      'manager':         'warning',
+      'employee':        'info',
+    }[(userRole.value || '').toLowerCase()] || 'grey'));
+
+    const allExpenses = computed(() => store.getters['expenses/all'] || []);
+    const allTickets  = computed(() => store.getters['tickets/all']  || []);
+
+    const pendingExpenses = computed(() => allExpenses.value.filter(e => e.expenseStatus === 'SUBMITTED').slice(0, 5));
+    const myExpenses      = computed(() => allExpenses.value.slice(0, 5));
+    const pendingPaymentTickets = computed(() => (store.getters['tickets/pendingPayment'] || []).slice(0, 5));
+    const awaitingBillTickets   = computed(() => (store.getters['tickets/awaitingBill']   || []).slice(0, 5));
+
+    const activeTab = ref('summary');
+
+    const summaryStats = computed(() => ({
+      expenses: {
+        total:     allExpenses.value.length,
+        submitted: allExpenses.value.filter(e => e.expenseStatus === 'SUBMITTED').length,
+        approved:  allExpenses.value.filter(e => e.expenseStatus === 'APPROVED').length,
+        rejected:  allExpenses.value.filter(e => e.expenseStatus === 'REJECTED').length,
+      },
+      tickets: {
+        total:        allTickets.value.length,
+        pending:      allTickets.value.filter(t => ['CREATED','PAYMENT_PARTIAL'].includes(t.ticketStatus)).length,
+        awaitingBill: allTickets.value.filter(t => t.ticketStatus === 'PAYMENT_FULL').length,
+        billed:       allTickets.value.filter(t => t.ticketStatus === 'BILLED').length,
+      },
+    }));
+
+    const expenseCards = computed(() => [
+      { label: 'Total Expenses', value: summaryStats.value.expenses.total,     color: 'primary', icon: 'mdi-receipt' },
+      { label: 'Pending Review', value: summaryStats.value.expenses.submitted,  color: 'warning', icon: 'mdi-clock-outline' },
+      { label: 'Approved',       value: summaryStats.value.expenses.approved,   color: 'success', icon: 'mdi-check-circle-outline' },
+      { label: 'Rejected',       value: summaryStats.value.expenses.rejected,   color: 'error',   icon: 'mdi-close-circle-outline' },
+    ]);
+    const ticketCards = computed(() => [
+      { label: 'Total Tickets',   value: summaryStats.value.tickets.total,        color: 'primary', icon: 'mdi-ticket-outline' },
+      { label: 'Pending Payment', value: summaryStats.value.tickets.pending,       color: 'warning', icon: 'mdi-cash-clock' },
+      { label: 'Awaiting Bills',  value: summaryStats.value.tickets.awaitingBill,  color: 'info',    icon: 'mdi-file-document-outline' },
+      { label: 'Billed',          value: summaryStats.value.tickets.billed,        color: 'success', icon: 'mdi-check-all' },
+    ]);
+
+    const greeting = computed(() => {
+      const h = new Date().getHours();
+      return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+    });
+
+    const getStatusColor = s => {
+      const l = (s || '').toLowerCase();
+      if (['approved','op_approved','billed','verified'].includes(l)) return 'success';
+      if (['submitted','created','payment_partial'].includes(l))       return 'warning';
+      if (['rejected','cancelled','bill_rejected'].includes(l))        return 'error';
+      if (['payment_full','awaiting_bill'].includes(l))                return 'info';
+      return 'secondary';
+    };
+
+    const fd = d => Utils.formatDate ? Utils.formatDate(d, 'short') : (d ? new Date(d).toLocaleDateString('en-IN') : '—');
+
+    // ── unified detail modal ──────────────────────────────────────────────
+    const showExpenseDetail = ref(false);
+    const showTicketDetail  = ref(false);
+    const selectedExpense   = ref(null);
+    const selectedTicket    = ref(null);
+    const openExpenseDetail = exp  => { selectedExpense.value = exp;  showExpenseDetail.value = true; };
+    const openTicketDetail  = tick => { selectedTicket.value  = tick; showTicketDetail.value  = true; };
+    const closeExpenseDetail= () => { showExpenseDetail.value = false; selectedExpense.value = null; };
+    const closeTicketDetail = () => { showTicketDetail.value  = false; selectedTicket.value  = null; };
+
+    onMounted(async () => {
+      const token = Utils.getToken ? Utils.getToken() : null;
+      if (!token) return;
+      const fetches = [];
+      if (!allExpenses.value.length) fetches.push(store.dispatch('expenses/fetchExpenses').catch(()=>{}));
+      if (!allTickets.value.length)  fetches.push(store.dispatch('tickets/fetchTickets').catch(()=>{}));
+      await Promise.all(fetches);
+    });
+
+    return {
+      greeting, userName, userRole, isAdmin, isAccounts, isEmployee, userInitials, userRoleBadge,
+      activeTab, mdAndDown,
+      expenseCards, ticketCards,
+      pendingExpenses, myExpenses, pendingPaymentTickets, awaitingBillTickets,
+      getStatusColor, fd,
+      showExpenseDetail, showTicketDetail, selectedExpense, selectedTicket,
+      openExpenseDetail, openTicketDetail, closeExpenseDetail, closeTicketDetail,
+    };
+  },
+  template: `
+  <div class="page-fade">
+    <v-container fluid class="pa-4 pa-md-6" :class="{ 'px-3': smAndDown }">
+      <!-- Header -->
+      <div class="d-flex align-center mb-4 mb-md-6">
+        <v-avatar :color="userRoleBadge" size="40" class="mr-3">
+          <span class="text-white font-weight-bold" style="font-size:14px">{{ userInitials }}</span>
+        </v-avatar>
+        <div>
+          <h1 class="text-h5 text-md-h4 font-weight-bold mb-0">{{ greeting }}, {{ userName }}!</h1>
+          <p class="text-body-2 text-medium-emphasis mb-0">{{ userRole }}</p>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <v-tabs v-model="activeTab" bg-color="transparent" color="primary" density="compact" class="mb-4">
+        <v-tab value="summary"><v-icon size="16" start>mdi-view-dashboard-outline</v-icon>Overview</v-tab>
+        <v-tab value="expenses"><v-icon size="16" start>mdi-receipt-text-outline</v-icon>Expenses</v-tab>
+        <v-tab value="tickets"><v-icon size="16" start>mdi-ticket-confirmation-outline</v-icon>Tickets</v-tab>
+      </v-tabs>
+
+      <v-window v-model="activeTab">
+
+        <!-- SUMMARY -->
+        <v-window-item value="summary">
+          <div class="text-overline font-weight-bold text-medium-emphasis mb-2">EXPENSE OVERVIEW</div>
+          <v-row dense class="mb-6">
+            <v-col cols="6" md="3" v-for="c in expenseCards" :key="c.label">
+              <v-card flat border rounded="xl" class="stat-card text-center pa-4"
+                :style="{borderTop: '4px solid rgb(var(--v-theme-' + c.color + '))'}">
+                <div style="font-size:28px;font-weight:600;line-height:1.2"
+                  :class="'text-' + c.color">{{ c.value }}</div>
+                <div class="text-caption text-medium-emphasis mt-1">{{ c.label }}</div>
+              </v-card>
+            </v-col>
+          </v-row>
+          <div class="text-overline font-weight-bold text-medium-emphasis mb-2">TICKET OVERVIEW</div>
+          <v-row dense>
+            <v-col cols="6" md="3" v-for="c in ticketCards" :key="c.label">
+              <v-card flat border rounded="xl" class="stat-card text-center pa-4"
+                :style="{borderTop: '4px solid rgb(var(--v-theme-' + c.color + '))'}">
+                <div style="font-size:28px;font-weight:600;line-height:1.2"
+                  :class="'text-' + c.color">{{ c.value }}</div>
+                <div class="text-caption text-medium-emphasis mt-1">{{ c.label }}</div>
+              </v-card>
+            </v-col>
+          </v-row>
+        </v-window-item>
+
+        <!-- EXPENSES -->
+        <v-window-item value="expenses">
+          <v-row>
+            <v-col cols="12" md="6">
+              <v-card rounded="lg" elevation="0" border class="h-100">
+                <v-card-title class="d-flex align-center pa-3 border-b">
+                  <v-icon color="warning" size="18" class="mr-2">mdi-clock-outline</v-icon>
+                  <span class="text-body-1 font-weight-bold">Pending Review</span>
+                  <v-spacer />
+                  <v-chip size="x-small" color="warning" variant="tonal">{{ pendingExpenses.length }}</v-chip>
+                </v-card-title>
+                <v-card-text class="pa-0" style="max-height:360px;overflow-y:auto">
+                  <v-list v-if="pendingExpenses.length" lines="two" class="py-0">
+                    <template v-for="(exp, idx) in pendingExpenses" :key="exp.referenceNumber">
+                      <v-list-item class="px-3 py-2 cursor-pointer" @click="openExpenseDetail(exp)">
+                        <template #prepend><v-icon color="warning" size="14" class="mt-1">mdi-clock-outline</v-icon></template>
+                        <v-list-item-title class="text-body-2 font-weight-medium">{{ exp.referenceNumber }}</v-list-item-title>
+                        <v-list-item-subtitle class="d-flex align-center gap-1 mt-1">
+                          <span class="text-caption">{{ exp.employeeName }}</span>
+                          <v-chip size="x-small" color="warning" variant="tonal" label>₹{{ (exp.totalAmount||0).toLocaleString('en-IN') }}</v-chip>
+                        </v-list-item-subtitle>
+                      </v-list-item>
+                      <v-divider v-if="idx < pendingExpenses.length - 1" />
+                    </template>
+                  </v-list>
+                  <div v-else class="pa-8 text-center">
+                    <v-icon size="48" color="success" class="mb-2">mdi-check-all</v-icon>
+                    <div class="text-body-2 text-medium-emphasis">All clear!</div>
+                  </div>
+                </v-card-text>
+              </v-card>
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-card rounded="lg" elevation="0" border class="h-100">
+                <v-card-title class="d-flex align-center pa-3 border-b">
+                  <v-icon color="primary" size="18" class="mr-2">mdi-receipt-text-outline</v-icon>
+                  <span class="text-body-1 font-weight-bold">Your Recent Expenses</span>
+                  <v-spacer />
+                  <v-chip size="x-small" color="primary" variant="tonal">{{ myExpenses.length }}</v-chip>
+                </v-card-title>
+                <v-card-text class="pa-0" style="max-height:360px;overflow-y:auto">
+                  <v-list v-if="myExpenses.length" lines="two" class="py-0">
+                    <template v-for="(exp, idx) in myExpenses" :key="exp.referenceNumber">
+                      <v-list-item class="px-3 py-2 cursor-pointer" @click="openExpenseDetail(exp)">
+                        <template #prepend><v-icon :color="getStatusColor(exp.expenseStatus)" size="14" class="mt-1">mdi-receipt-text-outline</v-icon></template>
+                        <v-list-item-title class="text-body-2 font-weight-medium">{{ exp.referenceNumber }}</v-list-item-title>
+                        <v-list-item-subtitle class="d-flex align-center gap-1 mt-1">
+                          <span class="text-caption">{{ fd(exp.createdAt) }}</span>
+                          <v-chip size="x-small" :color="getStatusColor(exp.expenseStatus)" variant="tonal" label>{{ $utils.statusLabel(exp.expenseStatus) }}</v-chip>
+                        </v-list-item-subtitle>
+                      </v-list-item>
+                      <v-divider v-if="idx < myExpenses.length - 1" />
+                    </template>
+                  </v-list>
+                  <div v-else class="pa-8 text-center">
+                    <v-icon size="48" color="grey" class="mb-2">mdi-receipt-outline</v-icon>
+                    <div class="text-body-2 text-medium-emphasis">No expenses yet</div>
+                  </div>
+                </v-card-text>
+              </v-card>
+            </v-col>
+          </v-row>
+        </v-window-item>
+
+        <!-- TICKETS -->
+        <v-window-item value="tickets">
+          <v-row>
+            <v-col cols="12" md="6">
+              <v-card rounded="lg" elevation="0" border class="h-100">
+                <v-card-title class="d-flex align-center pa-3 border-b">
+                  <v-icon color="warning" size="18" class="mr-2">mdi-cash-clock</v-icon>
+                  <span class="text-body-1 font-weight-bold">Pending Payment</span>
+                  <v-spacer />
+                  <v-chip size="x-small" color="warning" variant="tonal">{{ pendingPaymentTickets.length }}</v-chip>
+                </v-card-title>
+                <v-card-text class="pa-0" style="max-height:360px;overflow-y:auto">
+                  <v-list v-if="pendingPaymentTickets.length" lines="two" class="py-0">
+                    <template v-for="(t, i) in pendingPaymentTickets" :key="t.ticketNumber">
+                      <v-list-item class="px-3 py-2 cursor-pointer" @click="openTicketDetail(t)">
+                        <template #prepend><v-icon color="warning" size="14" class="mt-1">mdi-ticket-outline</v-icon></template>
+                        <v-list-item-title class="text-body-2 font-weight-medium">{{ t.ticketNumber }}</v-list-item-title>
+                        <v-list-item-subtitle class="text-caption">₹{{ (t.amount||0).toLocaleString('en-IN') }} · {{ t.employeeName }}</v-list-item-subtitle>
+                      </v-list-item>
+                      <v-divider v-if="i < pendingPaymentTickets.length - 1" />
+                    </template>
+                  </v-list>
+                  <div v-else class="pa-8 text-center"><v-icon size="48" color="success">mdi-check-all</v-icon></div>
+                </v-card-text>
+              </v-card>
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-card rounded="lg" elevation="0" border class="h-100">
+                <v-card-title class="d-flex align-center pa-3 border-b">
+                  <v-icon color="info" size="18" class="mr-2">mdi-file-document-outline</v-icon>
+                  <span class="text-body-1 font-weight-bold">Awaiting Bills</span>
+                  <v-spacer />
+                  <v-chip size="x-small" color="info" variant="tonal">{{ awaitingBillTickets.length }}</v-chip>
+                </v-card-title>
+                <v-card-text class="pa-0" style="max-height:360px;overflow-y:auto">
+                  <v-list v-if="awaitingBillTickets.length" lines="two" class="py-0">
+                    <template v-for="(t, i) in awaitingBillTickets" :key="t.ticketNumber">
+                      <v-list-item class="px-3 py-2 cursor-pointer" @click="openTicketDetail(t)">
+                        <template #prepend><v-icon color="info" size="14" class="mt-1">mdi-file-document-outline</v-icon></template>
+                        <v-list-item-title class="text-body-2 font-weight-medium">{{ t.ticketNumber }}</v-list-item-title>
+                        <v-list-item-subtitle class="text-caption">Paid ₹{{ (t.paidAmount||0).toLocaleString('en-IN') }} · {{ fd(t.updatedAt) }}</v-list-item-subtitle>
+                      </v-list-item>
+                      <v-divider v-if="i < awaitingBillTickets.length - 1" />
+                    </template>
+                  </v-list>
+                  <div v-else class="pa-8 text-center"><v-icon size="48" color="success">mdi-check-all</v-icon></div>
+                </v-card-text>
+              </v-card>
+            </v-col>
+          </v-row>
+        </v-window-item>
+      </v-window>
+    </v-container>
+
+    <!-- ═══ EXPENSE DETAIL MODAL (unified, medium) ═══ -->
+    <expense-detail-modal
+      v-model="showExpenseDetail"
+      :expense="selectedExpense"
+      @close="closeExpenseDetail"
+    />
+
+    <!-- ═══ TICKET DETAIL MODAL (unified, medium) ═══ -->
+    <ticket-detail-modal
+      v-model="showTicketDetail"
+      :ticket="selectedTicket"
+      @close="closeTicketDetail"
+    />
+  </div>`
+};
+
+</script>

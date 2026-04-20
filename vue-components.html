@@ -1,0 +1,1202 @@
+<script>
+
+// ==================== SNACKBAR ====================
+app.component('my-snackbar', {
+  setup() {
+    const store    = useStore();
+    const snackbar = computed(() => store.getters['ui/snackbar']);
+    const close    = () => store.dispatch('ui/closeSnackbar');
+    return { snackbar, close };
+  },
+  template: `
+    <v-snackbar
+      :model-value="snackbar.show"
+      @update:model-value="close"
+      :timeout="snackbar.timeout || 3000"
+      :color="snackbar.color || 'primary'"
+      location="top right"
+      rounded="xl"
+      elevation="8"
+    >
+      <div class="d-flex align-center">
+        <v-icon class="mr-2">{{ snackbar.icon || 'mdi-check-circle' }}</v-icon>
+        <span>{{ snackbar.message }}</span>
+      </div>
+      <template #actions>
+        <v-btn icon="mdi-close" size="small" variant="text" @click="close"></v-btn>
+      </template>
+    </v-snackbar>
+  `
+});
+
+// ==================== ENHANCED NAVBAR ====================
+app.component('my-navbar', {
+  setup() {
+    const store  = useStore();
+    const router = useRouter();
+    const route  = useRoute();
+
+    const { mdAndDown } = useDisplay();
+
+    const drawer            = ref(true);
+    const rail              = ref(false);
+    const userMenu          = ref(false);
+    const showNotifications = ref(false);
+    const notifications     = ref([]);
+    const notifLoading      = ref(false);
+
+    const isAuth       = computed(() => store.getters['auth/isAuth']);
+    const user         = computed(() => store.getters['auth/user']);
+    const userRole     = computed(() => store.getters['auth/userRole']);
+    const userEmail    = computed(() => store.getters['auth/userEmail']);
+    const userName     = computed(() => store.getters['auth/userName']);
+    const userJobTitle = computed(() => store.getters['auth/userJobTitle']);
+    const userManager  = computed(() => store.getters['auth/userManagerName']);
+    const userDistrict = computed(() => store.getters['auth/userDistrict']);
+    const userProject  = computed(() => store.getters['auth/userProject']);
+    const userLevel    = computed(() => store.getters['auth/userLevel']);
+
+    const isMobile    = computed(() => mdAndDown.value);
+    const isTemporary = computed(() => mdAndDown.value);
+
+    const isAdmin         = computed(() => store.getters['auth/isAdmin']);
+    const isOperationHead = computed(() => store.getters['auth/isOperationHead']);
+    const isAccounts      = computed(() => ['admin','accounts'].includes((userRole.value||'').toLowerCase()));
+
+    const pages = computed(() =>
+      router.options.routes.filter(r => {
+        if (r.path === '/login' || !r.meta?.title) return false;
+        if (r.meta?.adminOnly) return isAdmin.value || isOperationHead.value;
+        if (r.meta?.accountsOnly) return isAdmin.value || isAccounts.value;
+        return true;
+      })
+    );
+
+    const userInitials = computed(() => {
+      const name = user.value?.name || '';
+      if (!name) return '?';
+      const parts = name.trim().split(/\s+/);
+      return (parts.length >= 2
+        ? parts[0][0] + parts[parts.length - 1][0]
+        : name.substring(0, 2)).toUpperCase();
+    });
+
+    const userRoleBadge = computed(() => ({
+      'admin':           'error',
+      'operation head':  'deep-purple',
+      'senior manager':  'purple',
+      'manager':         'warning',
+      'employee':        'info',
+    }[(userRole.value || '').toLowerCase()] || 'grey'));
+
+    const unreadCount = computed(() => notifications.value.filter(n => !n.IsRead).length);
+
+    const { useTheme } = Vuetify;
+    const theme  = useTheme();
+    const isDark = computed(() => theme.global.current.value.dark);
+
+    const logout = async () => {
+      userMenu.value = false;
+      await store.dispatch('auth/logout');
+      router.push('/login');
+    };
+
+    const toggleTheme = () => {
+      const next = isDark.value ? 'light' : 'dark';
+      theme.global.name.value = next;
+      localStorage.setItem('taskManagerTheme', next);
+    };
+
+    const navigate = (path) => {
+      if (isMobile.value) drawer.value = false;
+      if (route.path !== path) router.push(path);
+    };
+
+    const toggleRail = () => {
+      if (!isMobile.value) {
+        rail.value = !rail.value;
+        localStorage.setItem('drawerRail', rail.value);
+      }
+    };
+
+    const fetchNotifications = async () => {
+      if (!userEmail.value) return;
+      try {
+        notifLoading.value = true;
+        // const result = await Utils.request('getNotifications', { userEmail: userEmail.value });
+        // notifications.value = result.notifications || [];
+      } catch (e) { console.error('Notifications:', e); }
+      finally { notifLoading.value = false; }
+    };
+
+    const markRead = async (id) => {
+      await Utils.request('markNotificationRead', { notificationId: id });
+      const n = notifications.value.find(n => n.NotificationID === id);
+      if (n) n.IsRead = true;
+    };
+
+    const markAllRead = async () => {
+      await Utils.request('markAllNotificationsRead', { userEmail: userEmail.value });
+      notifications.value.forEach(n => n.IsRead = true);
+    };
+
+    const notifIcon = type => ({
+      task_assigned:   'mdi-account-plus',   task_due:        'mdi-clock-alert',
+      task_completed:  'mdi-check-circle',   task_overdue:    'mdi-alert-circle',
+      recurring_task:  'mdi-repeat',         report_submitted:'mdi-file-document',
+      report_approved: 'mdi-check-circle',   report_rejected: 'mdi-close-circle',
+      system:          'mdi-cog',
+    }[type] || 'mdi-bell');
+
+    const notifColor = type => ({
+      task_assigned:   'primary', task_due:        'warning', task_completed:  'success',
+      task_overdue:    'error',   recurring_task:  'info',    report_submitted:'info',
+      report_approved: 'success', report_rejected: 'error',   system:          'grey',
+    }[type] || 'grey');
+
+    watch(isMobile, (val) => {
+      if (val) { drawer.value = false; rail.value = false; }
+      else {
+        const saved = localStorage.getItem('drawerOpen');
+        drawer.value = saved !== null ? saved === 'true' : true;
+        const savedRail = localStorage.getItem('drawerRail');
+        rail.value = savedRail === 'true';
+      }
+    }, { immediate: true });
+
+    watch(drawer, (val) => { if (!isMobile.value) localStorage.setItem('drawerOpen', val); });
+
+    onMounted(() => {
+      const savedTheme = localStorage.getItem('taskManagerTheme');
+      if (savedTheme) {
+        theme.global.name.value = savedTheme;
+      } else {
+        // Set dark mode as default
+        theme.global.name.value = 'dark';
+        localStorage.setItem('taskManagerTheme', 'dark');
+      }
+      
+      // Initialize sidebar as collapsed by default (rail mode) for desktop
+      if (!isMobile.value) {
+        const savedRail = localStorage.getItem('drawerRail');
+        if (savedRail === null) {
+          rail.value = true; // Start collapsed (rail mode)
+          localStorage.setItem('drawerRail', 'true');
+        }
+      }
+      
+      if (isAuth.value) { fetchNotifications(); setInterval(fetchNotifications, 120000); }
+    });
+
+    watch(isAuth, (val) => { if (val) fetchNotifications(); });
+
+    return {
+      drawer, rail, userMenu, showNotifications, notifications, notifLoading,
+      isAuth, user, userRole, userEmail, userName, userJobTitle,
+      userManager, userDistrict, userProject, userLevel,
+      pages, userInitials, userRoleBadge, unreadCount, isDark, isMobile, isTemporary,
+      isAdmin, isOperationHead, route,
+      logout, toggleTheme, navigate, toggleRail, fetchNotifications, markRead, markAllRead,
+      notifIcon, notifColor,
+    };
+  },
+
+  template: `
+<div v-if="isAuth && route.path !== '/login'">
+
+  <!-- PROFESSIONAL SIDEBAR -->
+  <v-navigation-drawer
+    v-model="drawer"
+    :rail="rail && !isMobile"
+    :temporary="isTemporary"
+    :permanent="!isTemporary"
+    width="228"
+    class="sidebar-pro"
+  >
+    <!-- Brand Header -->
+    <div :class="['sidebar-brand-pro', rail && !isMobile ? 'rail-mode' : '']">
+      <div class="brand-logo-wrap">
+        <div class="brand-icon-box">
+          <v-icon color="white" size="16">mdi-clipboard-check-outline</v-icon>
+        </div>
+        <transition name="slide-fade">
+          <div v-if="!rail || isMobile" class="brand-text-block">
+            <span class="brand-name">TaskFlow</span>
+            <span class="brand-sub">Workspace Manager</span>
+          </div>
+        </transition>
+      </div>
+    </div>
+
+    <div class="sidebar-section-label" v-if="!rail || isMobile">MENU</div>
+
+    <!-- Navigation Items -->
+    <nav class="sidebar-nav px-2">
+      <div
+        v-for="page in pages"
+        :key="page.path"
+        :class="['nav-item-pro', $route.path === page.path ? 'active' : '']"
+        @click="navigate(page.path)"
+      >
+        <v-icon size="16" class="nav-icon-pro">{{ page.meta && page.meta.icon }}</v-icon>
+        <transition name="slide-fade">
+          <span v-if="!rail || isMobile" class="nav-label-pro">{{ page.meta && page.meta.title }}</span>
+        </transition>
+        <div v-if="$route.path === page.path" class="nav-active-bar"></div>
+      </div>
+    </nav>
+
+    <!-- Sidebar Footer -->
+    <template #append>
+      <div class="sidebar-footer-pro">
+        <v-divider class="mb-3" />
+
+        <!-- Desktop-only utility row: theme + notifications -->
+        <div v-if="!isMobile" class="mb-2">
+
+          <!-- Expanded mode: full-width row -->
+          <transition name="slide-fade">
+            <div v-if="!rail" class="d-flex align-center gap-1 px-1 mb-2">
+
+              <!-- Theme toggle -->
+              <v-btn icon variant="text" size="small" @click="toggleTheme" class="util-btn-pro flex-shrink-0">
+                <v-icon size="18">{{ isDark ? 'mdi-weather-sunny' : 'mdi-weather-night' }}</v-icon>
+                <v-tooltip activator="parent" location="top">{{ isDark ? 'Light mode' : 'Dark mode' }}</v-tooltip>
+              </v-btn>
+
+              <!-- Notifications -->
+              <v-menu v-model="showNotifications" :close-on-content-click="false" width="360" location="top end">
+                <template #activator="{ props }">
+                  <v-btn icon variant="text" size="small" v-bind="props" class="util-btn-pro flex-shrink-0">
+                    <v-badge :content="unreadCount" :model-value="unreadCount > 0" color="error" overlap>
+                      <v-icon size="18">mdi-bell-outline</v-icon>
+                    </v-badge>
+                    <v-tooltip activator="parent" location="top">Notifications</v-tooltip>
+                  </v-btn>
+                </template>
+                <v-card rounded="xl" elevation="8" max-height="480">
+                  <v-toolbar flat density="compact" color="transparent">
+                    <v-toolbar-title class="text-subtitle-2 font-weight-bold">Notifications</v-toolbar-title>
+                    <v-spacer />
+                    <v-btn size="x-small" variant="text" @click="markAllRead" v-if="unreadCount > 0">Mark all read</v-btn>
+                    <v-btn icon size="small" variant="text" @click="showNotifications = false"><v-icon size="small">mdi-close</v-icon></v-btn>
+                  </v-toolbar>
+                  <v-divider />
+                  <v-list class="pa-0" style="max-height:380px; overflow-y:auto;">
+                    <template v-if="notifLoading">
+                      <v-list-item><div class="text-center py-4"><v-progress-circular indeterminate size="28" color="primary" /></div></v-list-item>
+                    </template>
+                    <template v-else-if="notifications.length === 0">
+                      <v-list-item>
+                        <div class="text-center py-8 text-medium-emphasis">
+                          <v-icon size="40" class="mb-2">mdi-bell-off-outline</v-icon>
+                          <p class="text-body-2">No notifications</p>
+                        </div>
+                      </v-list-item>
+                    </template>
+                    <template v-else>
+                      <v-list-item
+                        v-for="n in notifications" :key="n.NotificationID"
+                        :class="['notification-item', !n.IsRead ? 'unread' : '']"
+                        @click="markRead(n.NotificationID)" lines="two"
+                      >
+                        <template #prepend>
+                          <v-avatar :color="notifColor(n.Type)" size="36" class="mr-2">
+                            <v-icon :icon="notifIcon(n.Type)" color="white" size="18" />
+                          </v-avatar>
+                        </template>
+                        <v-list-item-title class="text-body-2 font-weight-medium mb-1">{{ n.Title }}</v-list-item-title>
+                        <v-list-item-subtitle class="text-caption">{{ n.Message }}</v-list-item-subtitle>
+                        <v-list-item-subtitle class="text-caption text-medium-emphasis mt-1">
+                          {{ $root.Utils.formatDate(n.CreatedDate, 'relative') }}
+                        </v-list-item-subtitle>
+                      </v-list-item>
+                    </template>
+                  </v-list>
+                </v-card>
+              </v-menu>
+
+              <v-spacer />
+
+            </div>
+          </transition>
+
+          <!-- Rail mode: stack icons vertically -->
+          <template v-if="rail">
+            <div class="d-flex flex-column align-center gap-1 mb-2">
+              <v-btn icon variant="text" size="small" @click="toggleTheme">
+                <v-icon size="18">{{ isDark ? 'mdi-weather-sunny' : 'mdi-weather-night' }}</v-icon>
+                <v-tooltip activator="parent" location="right">{{ isDark ? 'Light mode' : 'Dark mode' }}</v-tooltip>
+              </v-btn>
+              <v-menu v-model="showNotifications" :close-on-content-click="false" width="360" location="top end">
+                <template #activator="{ props }">
+                  <v-btn icon variant="text" size="small" v-bind="props">
+                    <v-badge :content="unreadCount" :model-value="unreadCount > 0" color="error" overlap>
+                      <v-icon size="18">mdi-bell-outline</v-icon>
+                    </v-badge>
+                    <v-tooltip activator="parent" location="right">Notifications</v-tooltip>
+                  </v-btn>
+                </template>
+                <v-card rounded="xl" elevation="8" max-height="480">
+                  <v-toolbar flat density="compact" color="transparent">
+                    <v-toolbar-title class="text-subtitle-2 font-weight-bold">Notifications</v-toolbar-title>
+                    <v-spacer />
+                    <v-btn size="x-small" variant="text" @click="markAllRead" v-if="unreadCount > 0">Mark all read</v-btn>
+                    <v-btn icon size="small" variant="text" @click="showNotifications = false"><v-icon size="small">mdi-close</v-icon></v-btn>
+                  </v-toolbar>
+                  <v-divider />
+                  <v-list class="pa-0" style="max-height:380px; overflow-y:auto;">
+                    <template v-if="notifLoading">
+                      <v-list-item><div class="text-center py-4"><v-progress-circular indeterminate size="28" color="primary" /></div></v-list-item>
+                    </template>
+                    <template v-else-if="notifications.length === 0">
+                      <v-list-item>
+                        <div class="text-center py-8 text-medium-emphasis">
+                          <v-icon size="40" class="mb-2">mdi-bell-off-outline</v-icon>
+                          <p class="text-body-2">No notifications</p>
+                        </div>
+                      </v-list-item>
+                    </template>
+                    <template v-else>
+                      <v-list-item
+                        v-for="n in notifications" :key="n.NotificationID"
+                        :class="['notification-item', !n.IsRead ? 'unread' : '']"
+                        @click="markRead(n.NotificationID)" lines="two"
+                      >
+                        <template #prepend>
+                          <v-avatar :color="notifColor(n.Type)" size="36" class="mr-2">
+                            <v-icon :icon="notifIcon(n.Type)" color="white" size="18" />
+                          </v-avatar>
+                        </template>
+                        <v-list-item-title class="text-body-2 font-weight-medium mb-1">{{ n.Title }}</v-list-item-title>
+                        <v-list-item-subtitle class="text-caption">{{ n.Message }}</v-list-item-subtitle>
+                        <v-list-item-subtitle class="text-caption text-medium-emphasis mt-1">
+                          {{ $root.Utils.formatDate(n.CreatedDate, 'relative') }}
+                        </v-list-item-subtitle>
+                      </v-list-item>
+                    </template>
+                  </v-list>
+                </v-card>
+              </v-menu>
+            </div>
+          </template>
+
+        </div>
+
+        <!-- User Card (when not in rail mode) -->
+        <transition name="fade">
+          <v-menu v-if="!rail || isMobile" v-model="userMenu" location="top" width="288">
+            <template #activator="{ props }">
+              <div class="user-card-pro" v-bind="props">
+                <v-avatar :color="userRoleBadge" size="30" class="user-avatar-pro">
+                  <span class="text-white font-weight-bold" style="font-size:11px; letter-spacing:0.02em;">{{ userInitials }}</span>
+                </v-avatar>
+                <div class="user-card-info">
+                  <div class="user-card-name">{{ userName }}</div>
+                  <div class="user-card-role">{{ userJobTitle || userRole }}</div>
+                </div>
+                <v-icon size="14" class="user-card-chevron">mdi-chevron-up</v-icon>
+              </div>
+            </template>
+            <v-card rounded="xl" elevation="10" class="user-popup-card">
+              <div class="user-popup-header">
+                <v-avatar :color="userRoleBadge" size="44" class="mr-3">
+                  <span class="text-white font-weight-bold text-subtitle-2">{{ userInitials }}</span>
+                </v-avatar>
+                <div style="flex:1; min-width:0;">
+                  <div class="text-body-2 font-weight-bold text-truncate">{{ userName }}</div>
+                  <div class="text-caption text-medium-emphasis text-truncate mt-0" style="max-width: 140px;">{{ userJobTitle || userRole }}</div>
+                </div>
+              </div>
+              <v-divider />
+              <div class="user-popup-details">
+                <div v-if="userJobTitle" class="popup-detail-row"><v-icon size="12" class="mr-2" color="primary">mdi-briefcase-outline</v-icon>{{ userJobTitle }}</div>
+                <div v-if="userProject" class="popup-detail-row"><v-icon size="12" class="mr-2" color="primary">mdi-folder-outline</v-icon>{{ userProject }}</div>
+                <div v-if="userDistrict" class="popup-detail-row"><v-icon size="12" class="mr-2" color="primary">mdi-map-marker-outline</v-icon>{{ userDistrict }}</div>
+                <div v-if="userManager" class="popup-detail-row"><v-icon size="12" class="mr-2" color="primary">mdi-account-outline</v-icon>Reports to: {{ userManager }}</div>
+                <div v-if="userLevel" class="mt-2"><v-chip size="x-small" color="primary" variant="tonal"><v-icon start size="x-small">mdi-shield-star-outline</v-icon>{{ userLevel }}</v-chip></div>
+              </div>
+              <v-divider />
+              <div class="pa-2">
+                <v-list-item v-if="isMobile" rounded="lg" @click="toggleTheme" class="mb-1" density="compact">
+                  <template #prepend><v-icon :icon="isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'" size="small" /></template>
+                  <v-list-item-title class="text-body-2">{{ isDark ? 'Light' : 'Dark' }} Mode</v-list-item-title>
+                </v-list-item>
+                <v-list-item rounded="lg" @click="logout" base-color="error" density="compact">
+                  <template #prepend><v-icon icon="mdi-logout" size="small" /></template>
+                  <v-list-item-title class="text-body-2 font-weight-medium">Sign Out</v-list-item-title>
+                </v-list-item>
+              </div>
+            </v-card>
+          </v-menu>
+        </transition>
+
+        <!-- Rail mode toggle -->
+        <v-btn
+          v-if="!isMobile"
+          block variant="text" size="small" rounded="lg"
+          class="collapse-btn-pro mt-2"
+          @click="toggleRail"
+        >
+          <v-icon size="16">{{ rail ? 'mdi-chevron-right' : 'mdi-chevron-left' }}</v-icon>
+          <span v-if="!rail" class="ml-1 text-caption">Collapse</span>
+        </v-btn>
+
+        <!-- Compact user avatar in rail mode -->
+        <v-menu v-if="rail && !isMobile" v-model="userMenu" location="top end" width="280">
+          <template #activator="{ props }">
+            <v-avatar
+              :color="userRoleBadge"
+              size="30"
+              class="mx-auto d-block cursor-pointer mt-2"
+              v-bind="props"
+            >
+              <span class="text-white font-weight-bold" style="font-size:10px;">{{ userInitials }}</span>
+              <v-tooltip activator="parent" location="right">{{ userName }}</v-tooltip>
+            </v-avatar>
+          </template>
+          <v-card rounded="xl" elevation="8">
+            <div class="user-popup-header">
+              <v-avatar :color="userRoleBadge" size="44" class="mr-3">
+                <span class="text-white font-weight-bold text-subtitle-2">{{ userInitials }}</span>
+              </v-avatar>
+              <div style="flex:1; min-width:0;">
+                <div class="text-body-2 font-weight-bold text-truncate">{{ userName }}</div>
+                <div class="text-caption text-medium-emphasis mt-0">{{ userJobTitle || userRole }}</div>
+              </div>
+            </div>
+            <v-divider />
+            <div class="user-popup-details">
+              <div v-if="userProject" class="popup-detail-row"><v-icon size="12" class="mr-2" color="primary">mdi-folder-outline</v-icon>{{ userProject }}</div>
+              <div v-if="userDistrict" class="popup-detail-row"><v-icon size="12" class="mr-2" color="primary">mdi-map-marker-outline</v-icon>{{ userDistrict }}</div>
+              <div v-if="userManager" class="popup-detail-row"><v-icon size="12" class="mr-2" color="primary">mdi-account-outline</v-icon>Reports to: {{ userManager }}</div>
+            </div>
+            <v-divider />
+            <div class="pa-2">
+              <v-list-item rounded="lg" @click="logout" base-color="error" density="compact">
+                <template #prepend><v-icon icon="mdi-logout" size="small" /></template>
+                <v-list-item-title class="text-body-2 font-weight-medium">Sign Out</v-list-item-title>
+              </v-list-item>
+            </div>
+          </v-card>
+        </v-menu>
+
+      </div>
+    </template>
+  </v-navigation-drawer>
+
+  <!-- APP BAR — mobile only -->
+  <v-app-bar v-if="isMobile" elevation="0" :height="56" class="border-b app-bar-enhanced">
+    <v-app-bar-nav-icon @click="drawer = !drawer" size="small" />
+
+    <div class="ml-1 font-weight-bold" style="font-size:15px; min-width:0; flex:1;">{{ $route.meta?.title || 'Dashboard' }}</div>
+
+    <v-spacer />
+
+    <!-- Theme Toggle -->
+    <v-btn icon variant="text" size="small" @click="toggleTheme" class="mr-1">
+      <v-icon size="20">{{ isDark ? 'mdi-weather-sunny' : 'mdi-weather-night' }}</v-icon>
+    </v-btn>
+
+    <!-- Notifications -->
+    <v-menu v-model="showNotifications" :close-on-content-click="false" width="340" location="bottom end">
+      <template #activator="{ props }">
+        <v-btn icon variant="text" size="small" v-bind="props" class="mr-1">
+          <v-badge :content="unreadCount" :model-value="unreadCount > 0" color="error" overlap>
+            <v-icon size="20">mdi-bell-outline</v-icon>
+          </v-badge>
+        </v-btn>
+      </template>
+      <v-card rounded="xl" elevation="8" max-height="420">
+        <v-toolbar flat density="compact" color="transparent">
+          <v-toolbar-title class="text-subtitle-2 font-weight-bold">Notifications</v-toolbar-title>
+          <v-spacer />
+          <v-btn size="x-small" variant="text" @click="markAllRead" v-if="unreadCount > 0">Mark all read</v-btn>
+          <v-btn icon size="small" variant="text" @click="showNotifications = false"><v-icon size="small">mdi-close</v-icon></v-btn>
+        </v-toolbar>
+        <v-divider />
+        <v-list class="pa-0" style="max-height:340px; overflow-y:auto;">
+          <template v-if="notifLoading">
+            <v-list-item><div class="text-center py-4"><v-progress-circular indeterminate size="28" color="primary" /></div></v-list-item>
+          </template>
+          <template v-else-if="notifications.length === 0">
+            <v-list-item>
+              <div class="text-center py-6 text-medium-emphasis">
+                <v-icon size="40" class="mb-2">mdi-bell-off-outline</v-icon>
+                <p class="text-body-2">No notifications</p>
+              </div>
+            </v-list-item>
+          </template>
+          <template v-else>
+            <v-list-item
+              v-for="n in notifications" :key="n.NotificationID"
+              :class="['notification-item', !n.IsRead ? 'unread' : '']"
+              @click="markRead(n.NotificationID)" lines="two"
+            >
+              <template #prepend>
+                <v-avatar :color="notifColor(n.Type)" size="36" class="mr-2">
+                  <v-icon :icon="notifIcon(n.Type)" color="white" size="18" />
+                </v-avatar>
+              </template>
+              <v-list-item-title class="text-body-2 font-weight-medium mb-1">{{ n.Title }}</v-list-item-title>
+              <v-list-item-subtitle class="text-caption">{{ n.Message }}</v-list-item-subtitle>
+              <v-list-item-subtitle class="text-caption text-medium-emphasis mt-1">
+                {{ $root.Utils.formatDate(n.CreatedDate, 'relative') }}
+              </v-list-item-subtitle>
+            </v-list-item>
+          </template>
+        </v-list>
+      </v-card>
+    </v-menu>
+
+    <!-- Mobile: user avatar -->
+    <v-menu v-model="userMenu" location="bottom end" width="280">
+      <template #activator="{ props }">
+        <v-avatar :color="userRoleBadge" size="32" class="mr-2 cursor-pointer" v-bind="props">
+          <span class="text-white font-weight-bold" style="font-size:11px;">{{ userInitials }}</span>
+        </v-avatar>
+      </template>
+      <v-card rounded="xl" elevation="8">
+        <v-card-text class="pa-4">
+          <div class="d-flex align-center mb-3">
+            <v-avatar :color="userRoleBadge" size="48" class="mr-3">
+              <span class="text-white font-weight-bold text-subtitle-1">{{ userInitials }}</span>
+            </v-avatar>
+            <div style="flex:1; min-width:0;">
+              <div class="text-body-2 font-weight-bold text-truncate">{{ userName }}</div>
+              <div class="text-caption text-medium-emphasis mt-0">{{ userJobTitle || userRole }}</div>
+            </div>
+          </div>
+        </v-card-text>
+        <v-divider />
+        <v-list density="compact" class="pa-2">
+          <v-list-item rounded="lg" @click="logout" base-color="error">
+            <template #prepend><v-icon icon="mdi-logout" size="small" /></template>
+            <v-list-item-title class="text-body-2 font-weight-medium">Sign Out</v-list-item-title>
+          </v-list-item>
+        </v-list>
+      </v-card>
+    </v-menu>
+  </v-app-bar>
+
+  <v-bottom-navigation
+    v-if="isMobile && isAuth && $route.path !== '/login'"
+    :model-value="$route.path"
+    grow elevation="8"
+    style="z-index:1002;"
+  >
+    <v-btn
+      v-for="page in pages" :key="page.path"
+      :value="page.path"
+      @click="navigate(page.path)"
+      :active="$route.path === page.path"
+      size="small"
+    >
+      <v-icon size="20">{{ page.meta?.icon }}</v-icon>
+      <span style="font-size:10px;">{{ page.meta?.title }}</span>
+    </v-btn>
+  </v-bottom-navigation>
+
+</div>
+  `
+});
+
+// ==================== UNIVERSAL FILTERS (unchanged) ====================
+app.component('universal-filters', {
+  props: {
+    modelValue: { type: Object, required: true },
+    config: {
+      type: Object,
+      default: () => ({
+        search:true, status:true, priority:false, category:false,
+        frequency:false, assignedUser:false, project:false,
+        district:false, dateRange:true, userEmail:false, taskId:false
+      })
+    },
+    options: {
+      type: Object,
+      default: () => ({ status:[], priority:[], category:[], frequency:[], users:[], projects:[], districts:[], tasks:[] })
+    },
+    labels: {
+      type: Object,
+      default: () => ({
+        status:'Status', priority:'Priority', category:'Category',
+        frequency:'Frequency', assignedUser:'Assigned To', project:'Project',
+        district:'District', dateRange:{ start:'From Date', end:'To Date' },
+        userEmail:'User', taskId:'Task'
+      })
+    },
+    showAdvancedToggle: { type: Boolean, default: false },
+  },
+  emits: ['update:modelValue'],
+  setup(props, { emit }) {
+    const showAdvanced  = ref(false);
+    const mobileExpanded = ref(false);
+    const { mdAndDown } = useDisplay();
+    const isMobile = computed(() => mdAndDown.value);
+
+    const update     = (key, value) => emit('update:modelValue', { ...props.modelValue, [key]: value });
+    const updateDate = (type, value) => emit('update:modelValue', {
+      ...props.modelValue, dateRange: { ...props.modelValue.dateRange, [type]: value }
+    });
+    const clearAll = () => {
+      emit('update:modelValue', {
+        search:'', status:[], priority:[], category:'', frequency:[],
+        assignedUser:'', project:'', district:'', userEmail:'', taskId:'',
+        dateRange:{ start:'', end:'' }
+      });
+      showAdvanced.value = false;
+      mobileExpanded.value = false;
+    };
+
+    const activeCount = computed(() => {
+      const f = props.modelValue;
+      return [
+        f.search?.length, f.status?.length, f.priority?.length,
+        f.category?.length, f.frequency?.length, f.assignedUser?.length,
+        f.project?.length, f.district?.length, f.userEmail?.length,
+        f.taskId?.length, f.dateRange?.start, f.dateRange?.end,
+      ].filter(Boolean).length;
+    });
+    const hasActive = computed(() => activeCount.value > 0);
+
+    return { showAdvanced, mobileExpanded, isMobile, update, updateDate, clearAll, activeCount, hasActive };
+  },
+  template: `
+  <v-card variant="outlined" rounded="xl" class="mb-3 filter-card">
+
+    <!-- ── Mobile: compact trigger bar ─────────────────────────────── -->
+    <div v-if="isMobile" class="d-flex align-center px-3 py-2" style="min-height:44px; cursor:pointer;" @click="mobileExpanded = !mobileExpanded">
+      <v-icon size="16" color="primary" class="mr-2">mdi-filter-outline</v-icon>
+      <span class="text-body-2 font-weight-medium" style="flex:1;">Filters</span>
+      <v-chip v-if="activeCount" size="x-small" color="primary" variant="flat" class="mr-2">{{ activeCount }}</v-chip>
+      <v-btn v-if="activeCount" size="x-small" icon variant="text" color="error" @click.stop="clearAll" class="mr-1">
+        <v-icon size="14">mdi-close</v-icon>
+      </v-btn>
+      <v-icon size="18" :style="{ transform: mobileExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }">mdi-chevron-down</v-icon>
+    </div>
+
+    <!-- ── Mobile: expandable filter body ───────────────────────────── -->
+    <v-expand-transition>
+      <div v-if="!isMobile || mobileExpanded">
+        <v-divider v-if="isMobile" />
+        <div :class="isMobile ? 'pa-3' : 'pa-4'">
+          <v-row dense align="center">
+
+            <v-col v-if="config.status" cols="6" sm="6" md="3">
+              <v-select
+                :model-value="modelValue.status" @update:model-value="update('status',$event)"
+                :items="options.status" :label="labels.status"
+                multiple density="compact" variant="outlined" rounded="lg"
+                hide-details clearable chips closable-chips
+              />
+            </v-col>
+
+            <v-col v-if="config.priority" cols="6" sm="6" md="3">
+              <v-select
+                :model-value="modelValue.priority" @update:model-value="update('priority',$event)"
+                :items="options.priority" :label="labels.priority"
+                multiple density="compact" variant="outlined" rounded="lg"
+                hide-details clearable chips closable-chips
+              />
+            </v-col>
+
+            <v-col v-if="config.category" cols="6" sm="6" md="3">
+              <v-select
+                :model-value="modelValue.category" @update:model-value="update('category',$event)"
+                :items="options.category" :label="labels.category"
+                density="compact" variant="outlined" rounded="lg" hide-details clearable
+              />
+            </v-col>
+
+            <v-col v-if="config.frequency" cols="6" sm="6" md="3">
+              <v-select
+                :model-value="modelValue.frequency" @update:model-value="update('frequency',$event)"
+                :items="options.frequency" :label="labels.frequency"
+                multiple density="compact" variant="outlined" rounded="lg"
+                hide-details clearable chips closable-chips
+              />
+            </v-col>
+
+            <v-col v-if="config.taskId" cols="12" sm="6" md="3">
+              <v-select
+                :model-value="modelValue.taskId" @update:model-value="update('taskId',$event)"
+                :items="options.tasks" item-title="TaskName" item-value="TaskID"
+                :label="labels.taskId"
+                density="compact" variant="outlined" rounded="lg" hide-details clearable
+              />
+            </v-col>
+
+            <template v-if="config.dateRange">
+              <v-col cols="6" sm="3" md="2">
+                <v-text-field
+                  :model-value="modelValue.dateRange.start" @update:model-value="updateDate('start',$event)"
+                  :label="labels.dateRange.start"
+                  type="date" density="compact" variant="outlined" rounded="lg"
+                  hide-details clearable @click:clear="updateDate('start','')"
+                />
+              </v-col>
+              <v-col cols="6" sm="3" md="2">
+                <v-text-field
+                  :model-value="modelValue.dateRange.end" @update:model-value="updateDate('end',$event)"
+                  :label="labels.dateRange.end"
+                  type="date" density="compact" variant="outlined" rounded="lg"
+                  hide-details clearable @click:clear="updateDate('end','')"
+                />
+              </v-col>
+            </template>
+
+            <!-- Desktop clear + more -->
+            <v-col v-if="!isMobile" cols="auto" class="ml-auto d-flex align-center gap-2">
+              <v-chip v-if="activeCount" size="small" color="primary" variant="tonal" closable @click:close="clearAll">
+                {{ activeCount }} filter{{ activeCount > 1 ? 's' : '' }}
+              </v-chip>
+              <v-btn v-if="showAdvancedToggle" size="small" variant="text" color="primary" @click="showAdvanced = !showAdvanced" rounded="lg">
+                <v-icon size="small" class="mr-1">{{ showAdvanced ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>More
+              </v-btn>
+            </v-col>
+
+            <!-- Advanced section (assignedUser, project, district) -->
+            <template v-if="showAdvancedToggle && showAdvanced || (isMobile && mobileExpanded)">
+              <v-col v-if="config.assignedUser" cols="12" sm="4">
+                <v-select
+                  :model-value="modelValue.assignedUser" @update:model-value="update('assignedUser',$event)"
+                  :items="options.users" item-title="name" item-value="email"
+                  :label="labels.assignedUser"
+                  density="compact" variant="outlined" rounded="lg" hide-details clearable
+                />
+              </v-col>
+              <v-col v-if="config.userEmail" cols="12" sm="4">
+                <v-select
+                  :model-value="modelValue.userEmail" @update:model-value="update('userEmail',$event)"
+                  :items="options.users" item-title="name" item-value="email"
+                  :label="labels.userEmail"
+                  density="compact" variant="outlined" rounded="lg" hide-details clearable
+                />
+              </v-col>
+              <v-col v-if="config.project" cols="12" sm="4">
+                <v-select
+                  :model-value="modelValue.project" @update:model-value="update('project',$event)"
+                  :items="options.projects" :label="labels.project"
+                  density="compact" variant="outlined" rounded="lg" hide-details clearable
+                />
+              </v-col>
+              <v-col v-if="config.district" cols="12" sm="4">
+                <v-select
+                  :model-value="modelValue.district" @update:model-value="update('district',$event)"
+                  :items="options.districts" :label="labels.district"
+                  density="compact" variant="outlined" rounded="lg" hide-details clearable
+                />
+              </v-col>
+            </template>
+
+          </v-row>
+        </div>
+      </div>
+    </v-expand-transition>
+
+  </v-card>
+  `
+});
+
+// ==================== GLOBAL LOADER ====================
+app.component('global-loader', {
+  setup() {
+    const store   = useStore();
+    const loading = computed(() => store.state.ui.loading);
+    return { loading };
+  },
+  template: `
+    <v-overlay
+      :model-value="loading"
+      class="align-center justify-center"
+      persistent
+      scrim="rgba(0,0,0,0.5)"
+    >
+      <v-progress-circular indeterminate size="64" width="6" color="primary" />
+    </v-overlay>
+  `
+});
+
+// ==================== PAGE HEADER ====================
+app.component('page-header', {
+  props: {
+    icon:     { type: String, default: '' },
+    title:    { type: String, required: true },
+    subtitle: { type: String, default: '' },
+  },
+  template: `
+  <div class="d-flex align-center mb-4">
+    <v-icon v-if="icon" size="20" color="primary" class="mr-2">{{ icon }}</v-icon>
+    <div style="flex:1; min-width:0;">
+      <h1 class="text-subtitle-1 font-weight-bold mb-0" style="line-height:1.3;">{{ title }}</h1>
+      <p v-if="subtitle" class="text-caption text-medium-emphasis mb-0">{{ subtitle }}</p>
+    </div>
+    <slot name="actions"></slot>
+  </div>
+  `
+});
+
+// ==================== STAT CARD ====================
+app.component('stat-card', {
+  props: {
+    icon:  { type: String, default: '' },
+    value: { type: [String, Number], required: true },
+    label: { type: String, required: true },
+    color: { type: String, default: 'primary' },
+  },
+  template: `
+  <v-card flat border rounded="xl" class="stat-card text-center pa-4"
+    :style="{borderTop: '4px solid rgb(var(--v-theme-' + color + '))'}">
+    <div style="font-size:28px;font-weight:600;line-height:1.2"
+      :class="'text-' + color">{{ value }}</div>
+    <div class="text-caption text-medium-emphasis mt-1">{{ label }}</div>
+  </v-card>
+  `
+});
+
+// ==================== EMPTY STATE ====================
+app.component('empty-state', {
+  props: {
+    icon:    { type: String, default: 'mdi-magnify' },
+    message: { type: String, default: 'No data found' },
+    hint:    { type: String, default: '' },
+  },
+  template: `
+  <div class="text-center pa-8">
+    <v-icon size="44" color="grey-lighten-2" class="mb-3">{{ icon }}</v-icon>
+    <p class="text-body-2 text-medium-emphasis mb-1">{{ message }}</p>
+    <p v-if="hint" class="text-caption text-disabled mb-0">{{ hint }}</p>
+    <slot></slot>
+  </div>
+  `
+});
+
+// ==================== CONFIRM DIALOG ====================
+app.component('confirm-dialog', {
+  props: {
+    modelValue:   { type: Boolean, default: false },
+    title:        { type: String, default: 'Confirm' },
+    message:      { type: String, default: 'Are you sure?' },
+    confirmText:  { type: String, default: 'Confirm' },
+    confirmColor: { type: String, default: 'error' },
+    loading:      { type: Boolean, default: false },
+  },
+  emits: ['update:modelValue', 'confirm'],
+  setup(props, { emit }) {
+    const show = computed({
+      get: () => props.modelValue,
+      set: v  => emit('update:modelValue', v),
+    });
+    return { show };
+  },
+  template: `
+  <v-dialog v-model="show" max-width="400">
+    <v-card rounded="lg">
+      <v-card-text class="pa-5">
+        <div class="d-flex align-start gap-3">
+          <v-icon :color="confirmColor" size="22" class="mt-1 flex-shrink-0">mdi-alert-circle-outline</v-icon>
+          <div>
+            <p class="text-subtitle-2 font-weight-bold mb-1">{{ title }}</p>
+            <p class="text-body-2 text-medium-emphasis mb-0">{{ message }}</p>
+          </div>
+        </div>
+      </v-card-text>
+      <v-card-actions class="pa-3 pt-0 gap-2">
+        <v-spacer></v-spacer>
+        <v-btn variant="text" rounded="lg" @click="show = false">Cancel</v-btn>
+        <v-btn :color="confirmColor" variant="elevated" rounded="lg" :loading="loading" @click="$emit('confirm')">
+          {{ confirmText }}
+        </v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
+  `
+});
+
+// ==================== LOADING CARD ====================
+app.component('loading-card', {
+  props: {
+    message: { type: String, default: 'Loading...' },
+  },
+  template: `
+  <v-card rounded="lg" class="text-center pa-8" elevation="0" border>
+    <v-progress-circular indeterminate color="primary" size="36" class="mb-3" />
+    <p class="text-body-2 text-medium-emphasis mb-0">{{ message }}</p>
+  </v-card>
+  `
+});
+
+console.log('✅ Enhanced Vue 3 components registered');
+</script>
+
+<style>
+/* ══════════════════════════════════════════════════
+   PROFESSIONAL SIDEBAR — complete redesign
+   ══════════════════════════════════════════════════ */
+
+/* ── Base drawer ── */
+.sidebar-pro {
+  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)) !important;
+}
+
+/* ── Brand area ── */
+.sidebar-brand-pro {
+  display: flex;
+  align-items: center;
+  padding: 18px 16px 14px;
+  transition: padding 0.25s ease;
+}
+.sidebar-brand-pro.rail-mode {
+  padding: 18px 0 14px;
+  justify-content: center;
+}
+.sidebar-brand-pro.rail-mode .brand-logo-wrap {
+  width: auto;
+  gap: 0;
+  justify-content: center;
+}
+.brand-logo-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  transition: width 0.25s ease, gap 0.25s ease; /* add this */
+}
+.brand-icon-box {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgb(var(--v-theme-primary)) 0%, rgba(var(--v-theme-primary), 0.7) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(var(--v-theme-primary), 0.35);
+}
+.brand-text-block {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.brand-name {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  color: rgb(var(--v-theme-on-surface));
+}
+.brand-sub {
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(var(--v-theme-on-surface), 0.45);
+  letter-spacing: 0.01em;
+  line-height: 1.4;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Section label ── */
+.sidebar-section-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: rgba(var(--v-theme-on-surface), 0.35);
+  padding: 0 18px 6px;
+  margin-top: 2px;
+}
+
+/* ── Nav items ── */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-item-pro {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+  user-select: none;
+  overflow: hidden;
+}
+.nav-item-pro:hover {
+  background: rgba(var(--v-theme-on-surface), 0.05);
+  color: rgba(var(--v-theme-on-surface), 0.9);
+}
+.nav-item-pro.active {
+  background: rgba(var(--v-theme-primary), 0.09);
+  color: rgb(var(--v-theme-primary));
+}
+.nav-icon-pro {
+  flex-shrink: 0;
+  opacity: 0.75;
+  transition: opacity 0.15s ease;
+}
+.nav-item-pro.active .nav-icon-pro {
+  opacity: 1;
+}
+.nav-label-pro {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+.nav-item-pro.active .nav-label-pro {
+  font-weight: 600;
+}
+.nav-active-bar {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 70%;
+  border-radius: 4px 0 0 4px;
+  background: rgb(var(--v-theme-primary));
+}
+
+/* ── Footer ── */
+.sidebar-footer-pro {
+  padding: 0 10px 12px;
+}
+
+/* ── Utility buttons ── */
+.util-btn-pro {
+  opacity: 0.65;
+  transition: opacity 0.15s ease;
+}
+.util-btn-pro:hover {
+  opacity: 1;
+}
+
+/* ── User card ── */
+.user-card-pro {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  cursor: pointer;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-surface-variant), 0.5);
+  transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  margin-bottom: 4px;
+}
+.user-card-pro:hover {
+  background: rgba(var(--v-theme-primary), 0.06);
+  border-color: rgba(var(--v-theme-primary), 0.25);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.user-avatar-pro {
+  flex-shrink: 0;
+}
+.user-card-info {
+  flex: 1;
+  min-width: 0;
+}
+.user-card-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: rgb(var(--v-theme-on-surface));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.user-card-role {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: rgba(var(--v-theme-on-surface), 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+.user-card-chevron {
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+/* ── User popup card ── */
+.user-popup-card {
+  overflow: hidden;
+}
+.user-popup-header {
+  display: flex;
+  align-items: center;
+  padding: 16px;
+}
+.user-popup-details {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.popup-detail-row {
+  display: flex;
+  align-items: center;
+  font-size: 11.5px;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+  line-height: 1.6;
+}
+
+/* ── Collapse button ── */
+.collapse-btn-pro {
+  opacity: 0.5;
+  font-size: 11px !important;
+  height: 28px !important;
+  transition: opacity 0.15s ease;
+}
+.collapse-btn-pro:hover {
+  opacity: 1;
+}
+
+/* ── Notification items ── */
+.notification-item {
+  transition: background-color 0.15s ease;
+}
+.notification-item:hover {
+  background-color: rgba(var(--v-theme-on-surface), 0.04);
+}
+.notification-item.unread {
+  background-color: rgba(var(--v-theme-primary), 0.05);
+  border-left: 3px solid rgb(var(--v-theme-primary));
+}
+
+/* ── Filter card ── */
+.filter-card {
+  background: rgba(var(--v-theme-surface), 1) !important;
+  border: 1px solid rgba(var(--v-border-color), 0.12) !important;
+}
+
+/* ── Transitions ── */
+.slide-fade-enter-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.slide-fade-leave-active {
+  transition: opacity 0.1s ease, transform 0.1s ease;
+}
+.slide-fade-enter-from {
+  opacity: 0;
+  transform: translateX(-6px);
+}
+.slide-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-6px);
+}
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.fade-enter-from, .fade-leave-to {
+  opacity: 0;
+}
+</style>

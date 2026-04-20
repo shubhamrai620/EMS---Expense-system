@@ -1,0 +1,425 @@
+<!-- ============================================================
+     vue-index.html  —  EMS App Bootstrap
+     Load order (strict):
+       1. CDN scripts (Vue, Vuetify, VueRouter, Vuex)
+       2. Vuetify config + Vue composable globals
+       3. Utils
+       4. vue-store.html      (Vuex store — depends on Utils)
+       5. views.html          (all 4 View components — depend on store)
+       6. vue-components.html (global app.component() calls — depend on store)
+       7. Router inline       (depends on view components being defined)
+       8. app.use(router) + app.mount()
+     ============================================================ -->
+
+<!-- ── 1. CDN LIBRARIES ─────────────────────────────────────── -->
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<link  href="https://cdn.jsdelivr.net/npm/vuetify@3.8.2/dist/vuetify.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/vuetify@3.8.2/dist/vuetify.min.js"></script>
+<script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
+<script src="https://unpkg.com/vuex@4/dist/vuex.global.prod.js"></script>
+
+<!-- ── 2. VUETIFY CONFIG + VUE COMPOSABLE GLOBALS ───────────── -->
+<style>
+/* ── Icons ── */
+.v-icon,.v-icon::before,.mdi,.mdi::before { font-family:'Material Design Icons'!important; }
+
+/* ── Navigation drawer ── */
+.v-navigation-drawer { z-index:1000; transition:width .2s cubic-bezier(.4,0,.2,1),transform .2s cubic-bezier(.4,0,.2,1); }
+.v-navigation-drawer--rail { width:56px!important; }
+.v-navigation-drawer--rail .v-list-item__prepend { margin-inline-end:0!important; }
+.v-navigation-drawer__content::-webkit-scrollbar { width:4px; }
+.v-navigation-drawer__content::-webkit-scrollbar-track { background:transparent; }
+.v-navigation-drawer__content::-webkit-scrollbar-thumb { background:rgba(0,0,0,.15);border-radius:3px; }
+
+/* ── Overlays ── */
+.v-overlay--active { z-index:999; }
+.v-menu>.v-overlay__content { z-index:2000; }
+.v-app-bar { z-index:1001; }
+
+/* ── Active nav item ── */
+.v-list-item--active { background-color:rgba(var(--v-theme-primary),.10)!important; color:rgb(var(--v-theme-primary))!important; }
+.v-list-item--active .v-icon { color:rgb(var(--v-theme-primary))!important; }
+.v-navigation-drawer .v-list-item { min-height:36px!important; }
+
+/* ── Responsive main ── */
+@media(max-width:960px){ .v-main{padding-top:56px!important;} }
+@media(min-width:960px){ .v-main{padding-top:0!important;} }
+
+/* ── Focus ── */
+.v-btn:focus-visible,.v-list-item:focus-visible { outline:2px solid rgb(var(--v-theme-primary));outline-offset:2px; }
+
+/* ── Buttons ── */
+.v-btn { text-transform:none!important; letter-spacing:0!important; }
+.v-tab { text-transform:none!important; letter-spacing:0!important; }
+
+/* ── Tables ── */
+.v-data-table { background:transparent!important; }
+.v-data-table thead th { font-size:11px!important;font-weight:600!important;text-transform:uppercase!important;letter-spacing:.06em!important;color:rgba(var(--v-theme-on-surface),.5)!important; }
+.v-data-table tbody .v-data-table__tr td { padding-top:10px!important;padding-bottom:10px!important; }
+
+/* ── Scrollbar global ── */
+::-webkit-scrollbar { width:4px;height:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:rgba(0,0,0,.12);border-radius:10px; }
+::-webkit-scrollbar-thumb:hover { background:rgba(0,0,0,.22); }
+
+/* ── Stat card hover ── */
+.stat-card { transition:box-shadow .2s ease,transform .2s ease!important; }
+.stat-card:hover { box-shadow:0 4px 20px rgba(0,0,0,.08)!important;transform:translateY(-1px); }
+
+/* ── Page fade ── */
+.page-fade { animation:pageFade .2s ease; }
+@keyframes pageFade { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
+
+/* ── Dialog system ── */
+.v-dialog>.v-overlay__content { margin:12px!important;max-height:calc(100vh - 24px)!important; }
+@media(max-width:600px){
+  .v-dialog>.v-overlay__content { margin:8px!important;max-width:calc(100vw - 16px)!important;max-height:calc(100vh - 16px)!important; }
+  .v-container { padding-left: 12px !important; padding-right: 12px !important; }
+}
+.v-dialog .v-card { display:flex;flex-direction:column;max-height:100%; }
+.v-dialog .v-toolbar { flex-shrink:0;min-height:48px!important; }
+.v-dialog .v-card-text { overflow-y:auto;flex:1 1 auto; }
+.v-dialog .v-card-actions { flex-shrink:0; }
+.v-menu>.v-overlay__content { z-index:2400!important; }
+.v-date-picker { z-index:2400!important; }
+input[type="date"]::-webkit-calendar-picker-indicator { cursor:pointer;opacity:.7; }
+
+/* ── Utilities ── */
+.gap-1{gap:4px}.gap-2{gap:8px}.gap-3{gap:12px}.gap-4{gap:16px}
+.w-100{width:100%}.cursor-pointer{cursor:pointer}
+.border-b{border-bottom:1px solid rgba(var(--v-border-color),var(--v-border-opacity))}
+
+/* ── Login background ── */
+.login-bg { min-height:100vh;width:100%;background:linear-gradient(135deg,#1e1b4b 0%,#0f172a 100%);display:flex;align-items:center;justify-content:center; }
+
+/* ── Print ── */
+@media print { .v-navigation-drawer,.v-app-bar{display:none!important} .v-main{padding:0!important} }
+</style>
+
+<script>
+const { createVuetify } = Vuetify;
+
+const vuetify = createVuetify({
+  theme: {
+    defaultTheme: 'light',
+    themes: {
+      light: {
+        colors: {
+          primary:    '#4F46E5',
+          secondary:  '#7c3aed',
+          accent:     '#059669',
+          error:      '#dc2626',
+          info:       '#0891b2',
+          success:    '#059669',
+          warning:    '#d97706',
+          background: '#F9FAFB',
+          surface:    '#ffffff',
+        }
+      },
+      dark: {
+        colors: {
+          primary:    '#818CF8',
+          secondary:  '#a78bfa',
+          accent:     '#34d399',
+          error:      '#f87171',
+          info:       '#22d3ee',
+          success:    '#34d399',
+          warning:    '#fbbf24',
+          background: '#0D1117',
+          surface:    '#161B22',
+        }
+      }
+    }
+  },
+  icons: { defaultSet: 'mdi' },
+  display: {
+    mobileBreakpoint: 'md',
+    thresholds: { xs:0, sm:600, md:960, lg:1280, xl:1920 }
+  }
+});
+
+// Vue 3 composables — available globally in all view <script> blocks
+const { ref, computed, watch, onMounted, nextTick, reactive } = Vue;
+const { useRouter, useRoute } = VueRouter;
+const { useDisplay } = Vuetify;
+
+console.log('✅ Vuetify 3.8.2 + VueRouter 4 + Vuex 4 CDN ready');
+</script>
+
+<!-- ── 3. UTILS ──────────────────────────────────────────────── -->
+<script>
+const Utils = {
+  getToken() { return sessionStorage.getItem('ems_token') || ''; },
+  setToken(token) {
+    if (token) sessionStorage.setItem('ems_token', token);
+    else sessionStorage.removeItem('ems_token');
+  },
+
+  request(functionName, params = {}) {
+    return new Promise((resolve, reject) => {
+      google.script.run
+        .withSuccessHandler(response => {
+          try {
+            const data = typeof response === 'string' ? JSON.parse(response) : response;
+            if (data?.ok === false && data?.error) {
+              reject(new Error(data.error.message || 'Request failed'));
+            } else if (data?.error) {
+              reject(new Error(typeof data.error === 'string' ? data.error : (data.error.message || 'Request failed')));
+            } else {
+              resolve(data?.ok === true && data?.data ? data.data : data);
+            }
+          } catch { reject(new Error('Invalid response from server')); }
+        })
+        .withFailureHandler(err => reject(new Error(err?.message || 'Request failed')))
+        [functionName](JSON.stringify(params));
+    });
+  },
+
+  formatDate(date, format = 'short') {
+    if (!date) return 'N/A';
+    try {
+      let d;
+      if (typeof date === 'string') {
+        if (/^\d{4}-\d{2}-\d{2}T/.test(date)) {
+          d = new Date(date);
+        } else {
+          const clean = date.split('T')[0].split(' ')[0].trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+            const [y,m,day] = clean.split('-').map(Number);
+            d = new Date(y, m-1, day);
+          } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(clean)) {
+            const [day,m,y] = clean.split('/').map(Number);
+            d = new Date(y, m-1, day);
+          } else if (/^\d{2}-\d{2}-\d{4}$/.test(clean)) {
+            const [day,m,y] = clean.split('-').map(Number);
+            d = new Date(y, m-1, day);
+          } else {
+            d = new Date(date);
+          }
+        }
+      } else { d = date instanceof Date ? date : new Date(date); }
+      if (isNaN(d.getTime())) return String(date);
+
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+      if (format === 'relative') {
+        const now = new Date(); now.setHours(0,0,0,0);
+        const cmp = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const diff = Math.floor((now - cmp) / 86400000);
+        if (diff === 0)  return 'Today';
+        if (diff === 1)  return 'Yesterday';
+        if (diff === -1) return 'Tomorrow';
+        if (diff > 0 && diff < 7)   return `${diff}d ago`;
+        if (diff < 0 && diff > -7)  return `In ${Math.abs(diff)}d`;
+        if (diff >= 7 && diff < 30) return `${Math.floor(diff/7)}w ago`;
+        return `${String(cmp.getDate()).padStart(2,'0')}-${months[cmp.getMonth()]}-${cmp.getFullYear()}`;
+      }
+
+      const out = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+      return `${String(out.getDate()).padStart(2,'0')}-${months[out.getMonth()]}-${out.getFullYear()}`;
+    } catch { return String(date); }
+  },
+
+  formatCurrency(amount) {
+    const n = parseFloat(amount) || 0;
+    return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  },
+
+  formatTime(time) {
+    if (!time) return '';
+    const [h, m] = time.split(':').map(Number);
+    return `${h%12||12}:${String(m).padStart(2,'0')} ${h>=12?'PM':'AM'}`;
+  },
+
+  // Maps backend STATUS / TICKET_STATUS values to Vuetify color names
+  statusColor(status) {
+    const map = {
+      // Expense status
+      SUBMITTED:              'warning',
+      APPROVED:               'success',
+      REJECTED:               'error',
+      CANCELLED:              'grey',
+      DRAFT:                  'grey',
+      // Ticket status
+      CREATED:                'warning',
+      PAYMENT_PARTIAL:        'orange',
+      PAYMENT_FULL:           'info',
+      BILLED:                 'info',
+      BILL_CORRECTION_NEEDED: 'warning',
+      VERIFIED:               'success',
+      BILL_REJECTED:          'error',
+      CLOSED:                 'grey',
+      FORCE_CLOSED:           'grey',
+      ADMIN_WAIVED:           'grey',
+      SETTLED:                'success',
+      REIMBURSED_CLOSED:      'teal',
+      // Stage
+      MANAGER:                'blue',
+      OP_HEAD:                'purple',
+      ACCOUNTS:               'teal',
+      COMPLETED:              'grey',
+    };
+    return map[(status || '').toUpperCase()] || 'grey';
+  },
+
+  // Human-readable label for status codes
+  statusLabel(status) {
+    const map = {
+      SUBMITTED:              'Submitted',
+      APPROVED:               'Approved',
+      REJECTED:               'Rejected',
+      CANCELLED:              'Cancelled',
+      DRAFT:                  'Draft',
+      CREATED:                'Pending Payment',
+      PAYMENT_PARTIAL:        'Partial Payment',
+      PAYMENT_FULL:           'Awaiting Bills',
+      BILLED:                 'Bills Submitted',
+      BILL_CORRECTION_NEEDED: 'Correction Needed',
+      VERIFIED:               'Bills Verified',
+      BILL_REJECTED:          'Bills Rejected',
+      CLOSED:                 'Closed',
+      FORCE_CLOSED:           'Force Closed',
+      ADMIN_WAIVED:           'Waived',
+      SETTLED:                'Settled',
+      REIMBURSED_CLOSED:      'Closed (Reimbursed)',
+      MANAGER:                'At Manager',
+      OP_HEAD:                'At Op Head',
+      ACCOUNTS:               'At Accounts',
+      COMPLETED:              'Completed',
+    };
+    return map[(status || '').toUpperCase()] || status || '—';
+  },
+};
+</script>
+
+<!-- ── 4. VUEX STORE ──────────────────────────────────────────── -->
+<?!= include_("vue-store.html"); ?>
+
+<!-- ── 5. CREATE APP  (store is ready; views + components come next) ── -->
+<script>
+const { createApp } = Vue;
+
+// Schema version guard — bump APP_SCHEMA_VERSION when backend
+// TOKEN_SCHEMA_VERSION changes, to force re-login with fresh token.
+const APP_SCHEMA_VERSION = 2;
+(function enforceSchemaVersion() {
+  const stored = parseInt(sessionStorage.getItem('emsSchemaVersion') || '0', 10);
+  if (stored < APP_SCHEMA_VERSION) {
+    console.warn(`[Schema] v${stored} → v${APP_SCHEMA_VERSION}: clearing stale token.`);
+    Utils.setToken('');
+    sessionStorage.setItem('emsSchemaVersion', String(APP_SCHEMA_VERSION));
+  }
+})();
+
+const app = createApp({
+  mounted() {
+    const token = Utils.getToken();
+    if (token) {
+      store.dispatch('auth/login', { token }).catch(() => Utils.setToken(''));
+    }
+  },
+});
+
+// Make Utils available in all templates as this.$utils
+app.config.globalProperties.$utils = Utils;
+
+// Make useStore available globally so view <script> blocks don't need to import
+window.useStore = Vuex.useStore;
+
+app.use(vuetify);
+app.use(store);
+</script>
+
+<!-- ── 6. VIEWS  (defines LoginView, DashboardView, ExpensesView, TicketsView, PaymentView) ── -->
+<?!= include_("a-v-login-view.html"); ?>
+<?!= include_("a-v-ticket-view.html"); ?>
+<?!= include_("a-v-dashboard-view.html"); ?>
+<?!= include_("a-v-expense-view.html"); ?>
+<?!= include_("a-v-payment-view.html"); ?>
+
+
+<!-- ── 7. GLOBAL COMPONENTS  (app.component() calls) ───────────────────────── -->
+<?!= include_("vue-components.html"); ?>
+
+<!-- ── 8. ROUTER  (all view components must be defined before this block) ───── -->
+<script>
+const { createRouter, createWebHashHistory } = VueRouter;
+
+// ── Route definitions ──────────────────────────────────────────────────────
+const routes = [
+  {
+    path:      '/',
+    component: DashboardView,
+    meta: { title: 'Dashboard', icon: 'mdi-view-dashboard-outline', nav: true }
+  },
+  {
+    path:      '/expenses',
+    component: ExpensesView,
+    meta: { title: 'Expenses', icon: 'mdi-receipt-text-outline', nav: true }
+  },
+  {
+    path:      '/payments',
+    name:      'payments',
+    component: PaymentView,
+    meta: {
+      title:        'Payments',
+      icon:         'mdi-cash-multiple',
+      accountsOnly: true
+    }
+  },
+  {
+    path:      '/tickets',
+    component: TicketsView,
+    meta: { title: 'Tickets', icon: 'mdi-ticket-confirmation-outline', nav: true }
+  },
+  {
+    path:      '/login',
+    component: LoginView,
+    meta: { title: 'Login', nav: false }
+  },
+  // Catch-all — redirect unknown paths to dashboard
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/'
+  },
+];
+
+const router = createRouter({
+  history: createWebHashHistory(),
+  routes,
+});
+
+// ── Navigation guard ───────────────────────────────────────────────────────
+router.beforeEach(async (to, from, next) => {
+  const token  = Utils.getToken();
+  let   isAuth = store.getters['auth/isAuth'];
+
+  // Silent token restore if store cleared but token still in sessionStorage
+  if (token && !isAuth) {
+    try {
+      await store.dispatch('auth/login', { token });
+      isAuth = store.getters['auth/isAuth'];
+    } catch {
+      Utils.setToken('');
+      return to.path !== '/login' ? next('/login') : next();
+    }
+  }
+
+  if (to.path !== '/login' && !isAuth) return next('/login');
+  if (to.path === '/login'  &&  isAuth) return next('/');
+  next();
+});
+
+// Push path into GAS URL bar so browser back/forward works
+router.afterEach(to => {
+  try { google.script.history.push(null, null, to.path); } catch { /* local dev */ }
+});
+
+// ── Register router + mount ────────────────────────────────────────────────
+app.use(router);
+app.mount('#app');
+
+console.log('✅ EMS — Vue 3 + Vuex 4 + Vuetify 3.8.2 + Vue Router 4 mounted');
+console.log('   Routes:', routes.filter(r => r.meta?.nav).map(r => r.path).join(', '));
+</script>

@@ -1,0 +1,1655 @@
+<script>
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED MODAL COMPONENTS
+// (registered globally so all views + dashboard can use them)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── expense-detail-modal ────────────────────────────────────────────────────
+// CHANGE LOG (v2):
+//   • Removed: canProcessPayments prop, canHold/canRelease computed, Hold/Release actions
+//   • Removed: Payment History section from modal body
+//   • Removed: PAYMENT ON HOLD chip and hold warning banner
+//   • Removed: hold / release emits (payment actions moved to PaymentView)
+//   • Kept:    All expense info, items table, bank details (ADVANCE), approval history, description
+//   • Kept:    Approve / Reject actions (canApprove / canAction)
+// ─────────────────────────────────────────────────────────────────────────────
+app.component('expense-detail-modal', {
+  props: {
+    modelValue: Boolean,
+    expense:    Object,
+    loading:    { type: Boolean, default: false },
+    canApprove: { type: Boolean, default: false },
+    // ⛔ REMOVED: canProcessPayments — payment actions live in PaymentView now
+    // ⛔ REMOVED: ticketStatus       — no longer needed in this modal
+  },
+  emits: [
+    'update:modelValue',
+    'close',
+    'approve',
+    'reject'
+  ],
+  setup(props, { emit }) {
+    const fd  = d => d ? new Date(d).toLocaleDateString('en-IN') : '—';
+    const fmt = v => (v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+
+    const getStatusColor = s => {
+      const l = (s || '').toLowerCase();
+      if (['approved', 'op_approved', 'billed'].includes(l)) return 'success';
+      if (['submitted', 'created'].includes(l))              return 'warning';
+      if (['rejected', 'cancelled'].includes(l))             return 'error';
+      return 'secondary';
+    };
+
+    const close   = () => emit('update:modelValue', false);
+    const print   = () => props.expense && printExpense(props.expense);
+    const approve = () => emit('approve', props.expense);
+    const reject  = () => emit('reject',  props.expense);
+
+    // Only show approve/reject when expense is in SUBMITTED state
+    const canAction = computed(() =>
+      props.canApprove &&
+      props.expense &&
+      props.expense.expenseStatus === 'SUBMITTED'
+    );
+
+    return {
+      fd, fmt, getStatusColor, close, print, approve, reject, canAction
+    };
+  },
+
+  template: `
+  <v-dialog :model-value="modelValue" @update:model-value="close" max-width="620" scrollable class="bottom-sheet">
+    <v-card v-if="expense" rounded="xl">
+
+      <v-toolbar density="compact" color="surface" flat class="px-2">
+        <span class="text-caption text-medium-emphasis">
+          {{ expense.referenceNumber }}
+        </span>
+        <v-spacer />
+        <v-btn icon size="small" variant="text" @click="print" title="Print">
+          <v-icon>mdi-printer-outline</v-icon>
+        </v-btn>
+        <v-btn icon size="small" variant="text" @click="close">
+          <v-icon>mdi-close</v-icon>
+        </v-btn>
+      </v-toolbar>
+
+      <!-- Hero block — the one thing every approver needs to see immediately -->
+      <div class="px-5 pt-3 pb-4 info-surface mx-4 mt-2 mb-1 rounded-xl">
+        <div class="amount-display text-primary">
+          ₹{{ fmt(expense.totalAmount) }}
+        </div>
+        <div class="d-flex gap-2 mt-2">
+          <v-chip :color="getStatusColor(expense.expenseStatus)" variant="flat" size="small" label>
+            {{ $utils.statusLabel(expense.expenseStatus) }}
+          </v-chip>
+          <v-chip color="primary" variant="tonal" size="small" label>
+            {{ expense.expenseType }}
+          </v-chip>
+          <v-chip color="secondary" variant="tonal" size="small" label v-if="expense.currentStage">
+            Stage: {{ expense.currentStage }}
+          </v-chip>
+          <!-- ✅ Ticket link chip — read-only reference only, no payment actions -->
+          <v-chip v-if="expense.ticketNumber" color="deep-purple" variant="tonal" size="small" label>
+            Ticket: {{ expense.ticketNumber }}
+          </v-chip>
+        </div>
+      </div>
+
+      <v-card-text class="pa-4" style="max-height:72vh;overflow-y:auto">
+        <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-3" />
+
+        <!-- ── Info grid ── -->
+        <div class="info-surface mb-4">
+          <v-row dense>
+            <v-col cols="6">
+              <div class="detail-label">Employee</div>
+              <div class="detail-val">{{ expense.employeeName || '—' }}</div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Project</div>
+              <div class="detail-val">{{ expense.projectCode || '—' }}</div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Expense Date</div>
+              <div class="detail-val">{{ fd(expense.expenseDate) }}</div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Submitted On</div>
+              <div class="detail-val">{{ fd(expense.createdAt) }}</div>
+            </v-col>
+            <v-col cols="6">
+              <div class="detail-label">Total Amount</div>
+              <div class="detail-val text-success font-weight-bold">₹{{ fmt(expense.totalAmount) }}</div>
+            </v-col>
+            <v-col cols="6"
+              v-if="expense.expenseStatus === 'APPROVED' || expense.expenseStatus === 'OP_APPROVED'">
+              <div class="detail-label">Approved Amount</div>
+              <div class="detail-val text-success font-weight-bold">₹{{ fmt(expense.totalApprovedAmount) }}</div>
+            </v-col>
+            <v-col cols="6" v-if="expense.approvedByName">
+              <div class="detail-label">Approved By</div>
+              <div class="detail-val">{{ expense.approvedByName }}</div>
+            </v-col>
+          </v-row>
+        </div>
+
+        <v-divider class="mb-3" />
+
+        <!-- ── Expense Items table ── -->
+        <div class="section-label mt-2 mb-3">EXPENSE ITEMS</div>
+        <v-table v-if="expense.items && expense.items.length && !$vuetify.display.smAndDown"
+          density="compact" class="rounded-lg border mb-4">
+          <thead>
+            <tr>
+              <th class="text-caption">Head</th>
+              <th class="text-caption">Sub-Head</th>
+              <th class="text-caption">Description</th>
+              <th class="text-right text-caption">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(it, i) in expense.items" :key="i">
+              <td><v-chip size="x-small" color="primary" variant="tonal" label>{{ it.head }}</v-chip></td>
+              <td class="text-caption">{{ it.subHead || '—' }}</td>
+              <td class="text-caption text-medium-emphasis">{{ it.description || '—' }}</td>
+              <td class="text-right text-body-2 font-weight-medium">₹{{ fmt(it.amount) }}</td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="3" class="text-right font-weight-bold pa-2 text-body-2">Total</td>
+              <td class="text-right font-weight-bold pa-2 text-success text-body-1">
+                ₹{{ fmt(expense.totalAmount) }}
+              </td>
+            </tr>
+          </tfoot>
+        </v-table>
+
+        <div v-else-if="expense.items && expense.items.length && $vuetify.display.smAndDown" class="mb-4">
+          <div v-for="(it, i) in expense.items" :key="i"
+            class="d-flex align-start pa-3 rounded-lg mb-2"
+            style="border:1px solid rgba(var(--v-border-color),.15);
+                   border-left:3px solid rgb(var(--v-theme-primary))">
+            <div style="flex:1">
+              <div class="text-body-2 font-weight-medium">{{ it.head }}</div>
+              <div class="text-caption text-medium-emphasis">{{ it.subHead || '—' }}</div>
+              <div v-if="it.description" class="text-caption mt-1">{{ it.description }}</div>
+            </div>
+            <div class="text-body-2 font-weight-bold ml-3 flex-shrink-0">
+              ₹{{ fmt(it.amount) }}
+            </div>
+          </div>
+          <div class="d-flex justify-space-between pa-2 text-body-2 font-weight-bold">
+            <span>Total</span>
+            <span class="text-primary">₹{{ fmt(expense.totalAmount) }}</span>
+          </div>
+        </div>
+        
+        <v-alert v-else-if="!loading" type="info" variant="tonal" density="compact" class="mb-4">
+          No line items found.
+        </v-alert>
+
+        <!-- ── Reference Note ── -->
+        <template v-if="expense.referenceNote">
+          <v-divider class="mb-3" />
+          <div class="d-flex align-start gap-2 mb-2">
+            <v-icon size="14" color="medium-emphasis" class="mt-1">mdi-note-text-outline</v-icon>
+            <div>
+              <div class="detail-label mb-0">Reference Note</div>
+              <div class="text-body-2">{{ expense.referenceNote }}</div>
+            </div>
+          </div>
+        </template>
+
+        <!-- ── Bank details (ADVANCE only) ── -->
+        <template v-if="expense.bankDetails && expense.expenseType === 'ADVANCE'">
+          <v-divider class="mb-3" />
+          <div class="d-flex align-center gap-2 mb-3">
+            <v-icon size="14" color="medium-emphasis">mdi-bank-outline</v-icon>
+            <span class="text-caption text-medium-emphasis font-weight-medium">BANK</span>
+            <span class="text-caption" style="letter-spacing: 0">
+              {{ expense.bankDetails.accountName || '—' }} ·
+              A/C {{ expense.bankDetails.accountNumber || '—' }} ·
+              {{ expense.bankDetails.ifsc || '—' }} ·
+              {{ expense.bankDetails.bankName || '—' }}
+            </span>
+          </div>
+        </template>
+
+        <!-- ⛔ REMOVED: Payment History section — now lives in PaymentView only -->
+
+        <!-- ── Approval history timeline ── -->
+        <template v-if="expense.historyJSON && expense.historyJSON.length">
+          <div class="section-label mt-2 mb-3">APPROVAL HISTORY</div>
+          <div class="history-timeline">
+            <div v-for="(h, i) in expense.historyJSON" :key="i"
+              class="d-flex gap-3 pb-3"
+              :style="i < expense.historyJSON.length-1
+                ? 'border-left:2px solid rgba(var(--v-border-color),.2);margin-left:7px;padding-left:16px'
+                : 'margin-left:7px;padding-left:16px'"
+            >
+              <div style="position:relative;margin-left:-23px;flex-shrink:0">
+                <div style="width:12px;height:12px;border-radius:50%;margin-top:3px"
+                  :style="{background: h.action.includes('REJECT') ? '#dc2626'
+                         : h.action.includes('APPROVED') ? '#059669' : '#4F46E5'}"></div>
+              </div>
+              <div>
+                <div class="text-body-2 font-weight-medium">{{ h.action }} · {{ h.name }}</div>
+                <div class="text-caption text-medium-emphasis">
+                  {{ fd(h.timestamp) }}{{ h.note ? ' — ' + h.note : '' }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- ── Description ── -->
+        <template v-if="expense.description">
+          <div class="section-label mt-2 mb-3">DESCRIPTION</div>
+          <div class="text-body-2 mb-3">{{ expense.description }}</div>
+        </template>
+
+      </v-card-text>
+
+      <!-- ── Actions — approve/reject only (NO payment actions) ── -->
+      <v-card-actions class="pa-3 border-t">
+        <div class="d-flex gap-2 w-100">
+          <v-btn v-if="canAction" color="error"
+            variant="outlined" rounded="lg" class="flex-1"
+            prepend-icon="mdi-close-circle" @click="reject">
+            Reject
+          </v-btn>
+          <v-spacer />
+          <v-btn v-if="canAction" color="success"
+            variant="flat" rounded="lg" class="flex-1"
+            prepend-icon="mdi-check-circle" @click="approve">
+            Approve
+          </v-btn>
+        </div>
+      </v-card-actions>
+
+    </v-card>
+    <v-card v-else rounded="xl" class="pa-8 text-center">
+      <v-progress-circular indeterminate />
+    </v-card>
+  </v-dialog>`
+});
+
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. EXPENSES VIEW
+// CHANGE LOG (v2):
+//   • Removed: "Pending Payments" tab (moved to PaymentView)
+//   • Removed: pendingPayments computed
+//   • Removed: showPayment / paymentForm / openPayment / submitPayment
+//   • Removed: Hold/Release functionality (moved to PaymentView)
+//   • Kept:    All existing expense CRUD + approval/rejection flow
+//   • Kept:    expense-detail-modal (without payment props now)
+// ═══════════════════════════════════════════════════════════════════════════
+const ExpensesView = {
+  name: 'ExpensesView',
+  setup() {
+    const store   = useStore();
+    const route   = useRoute();
+    const router  = useRouter();
+    const { mdAndDown, smAndDown } = useDisplay();
+
+    // ── Auth / role ──────────────────────────────────────────────────────
+    const userEmail   = computed(() => store.getters['auth/userEmail']);
+    const userName    = computed(() => store.getters['auth/userName']);
+    const userRole    = computed(() => store.getters['auth/userRole']);
+    const userProject = computed(() => store.getters['auth/userProject']);
+    const isEmployee  = computed(() => (userRole.value || '').toLowerCase() === 'employee');
+    const isManager   = computed(() => ['admin', 'manager', 'operation_head'].includes((userRole.value || '').toLowerCase()));
+    const canApprove  = computed(() => store.getters['auth/canApprove']);
+    const allUsers    = computed(() => store.getters['users/allUsers'] || []);
+    const managers    = computed(() => allUsers.value.filter(u =>
+      ['manager', 'operation_head', 'admin'].includes(u.role || '')
+    ));
+
+    // ── Data ─────────────────────────────────────────────────────────────
+    const allExpenses = computed(() => store.getters['expenses/all'] || []);
+    const isLoading   = computed(() => store.getters['expenses/isLoading']);
+
+    // ── Tabs — 3-Tab Structure: Pending / Approved / All ─────────────────
+    const activeTab = ref('pending');
+
+    // ── Computed for 3-tab structure ────────────────────────────────────────
+    const pendingExpenses = computed(() => 
+      allExpenses.value.filter(e => e.expenseStatus === 'SUBMITTED')
+    );
+    const approvedExpenses = computed(() => 
+      allExpenses.value.filter(e => ['APPROVED', 'OP_APPROVED'].includes(e.expenseStatus))
+    );
+
+    // ── Bulk Selection ──────────────────────────────────────────────────────
+    const selectedExpenses = ref([]);
+    const toggleSelection = (exp) => {
+      const idx = selectedExpenses.value.indexOf(exp.referenceNumber);
+      if (idx > -1) selectedExpenses.value.splice(idx, 1);
+      else selectedExpenses.value.push(exp.referenceNumber);
+    };
+    const isSelected = (refNum) => selectedExpenses.value.includes(refNum);
+    const selectAll = (items) => {
+      if (selectedExpenses.value.length === items.length) {
+        selectedExpenses.value = [];
+      } else {
+        selectedExpenses.value = items.map(e => e.referenceNumber);
+      }
+    };
+
+    // ── Days Pending Calculation ────────────────────────────────────────────
+    const getDaysPending = (createdAt) => {
+      if (!createdAt) return '—';
+      const created = new Date(createdAt);
+      const now = new Date();
+      const diff = Math.floor((now - created) / (1000 * 60 * 60 * 24));
+      return diff === 0 ? 'Today' : diff === 1 ? '1 day' : `${diff} days`;
+    };
+
+    // ── Filters ──────────────────────────────────────────────────────────
+    const filterStatus = ref('');
+    const filterType   = ref('');
+    const filterSearch = ref('');
+    const filterDateFrom = ref('');
+    const filterDateTo   = ref('');
+    const filterProject  = ref('');
+    const filterQuick    = ref(''); // Quick filter chips
+
+    // Get unique projects for filter dropdown
+    const projectList = computed(() => {
+      const projects = new Set(allExpenses.value.map(e => e.projectCode).filter(Boolean));
+      return Array.from(projects).sort();
+    });
+
+    const filteredExpenses = computed(() => {
+      let list = allExpenses.value;
+      
+      // Apply tab-based filtering first
+      if (activeTab.value === 'pending') {
+        list = list.filter(e => e.expenseStatus === 'SUBMITTED');
+      } else if (activeTab.value === 'approved') {
+        list = list.filter(e => ['APPROVED', 'OP_APPROVED'].includes(e.expenseStatus));
+      }
+      
+      // Apply quick filters
+      if (filterQuick.value === 'myPending') {
+        list = list.filter(e => e.expenseStatus === 'SUBMITTED' && e.email === userEmail.value);
+      } else if (filterQuick.value === 'needsApproval') {
+        list = list.filter(e => e.expenseStatus === 'SUBMITTED');
+      } else if (filterQuick.value === 'myApproved') {
+        list = list.filter(e =>
+          ['APPROVED', 'OP_APPROVED'].includes(e.expenseStatus) &&
+          e.email === userEmail.value
+        );
+      } else if (filterQuick.value === 'recent') {
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        list = list.filter(e => new Date(e.createdAt) >= weekAgo);
+      }
+      
+      // Apply other filters
+      if (filterStatus.value) list = list.filter(e => e.expenseStatus === filterStatus.value);
+      if (filterType.value)   list = list.filter(e => e.expenseType   === filterType.value);
+      if (filterProject.value) list = list.filter(e => e.projectCode === filterProject.value);
+      if (filterSearch.value) {
+        const q = filterSearch.value.toLowerCase();
+        list = list.filter(e =>
+          (e.referenceNumber || '').toLowerCase().includes(q) ||
+          (e.employeeName    || '').toLowerCase().includes(q)
+        );
+      }
+      // Date range filter
+      if (filterDateFrom.value) {
+        const from = new Date(filterDateFrom.value);
+        list = list.filter(e => new Date(e.createdAt) >= from);
+      }
+      if (filterDateTo.value) {
+        const to = new Date(filterDateTo.value);
+        to.setHours(23, 59, 59);
+        list = list.filter(e => new Date(e.createdAt) <= to);
+      }
+      return list;
+    });
+
+    // ⛔ REMOVED: pendingPayments computed
+    // ⛔ REMOVED: canProcessPayments — not needed in this view
+
+    const myExpenses = computed(() => filteredExpenses.value);
+    const currentTabExpenses = computed(() => {
+      if (activeTab.value === 'pending') return pendingExpenses.value;
+      if (activeTab.value === 'approved') return approvedExpenses.value;
+      return allExpenses.value;
+    });
+
+    const getStatusColor = s => {
+      const l = (s || '').toLowerCase();
+      if (['approved', 'op_approved', 'billed'].includes(l)) return 'success';
+      if (['submitted', 'created'].includes(l))              return 'warning';
+      if (['rejected', 'cancelled'].includes(l))             return 'error';
+      return 'secondary';
+    };
+    const fd = d => d ? new Date(d).toLocaleDateString('en-IN') : '&#8212;';
+    const currencyFormat = (amount) => {
+      return '&#8377;' + (amount || 0).toLocaleString('en-IN', { 
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2 
+      });
+    };
+
+    // ── Table headers ────────────────────────────────────────────────────
+    const headers = computed(() => {
+      const base = [
+        { title: '', key: 'checkbox', sortable: false, width: '40px', align: 'center' },
+        { title: 'Ref #', key: 'referenceNumber', width: '140px' },
+        { title: 'Type', key: 'expenseType', width: '120px' },
+        { title: 'Amount', key: 'totalAmount', width: '110px', align: 'end' },
+        { title: 'Status', key: 'expenseStatus', width: '120px' },
+        { title: 'Stage', key: 'currentStage', width: '100px' },
+        { title: 'Linked Tkt', key: 'linkedTicketNumber', width: '110px' },
+        { title: 'Days', key: 'daysPending', width: '80px' },
+        { title: 'Date', key: 'createdAt', width: '100px' },
+        { title: '', key: 'actions', sortable: false, width: '80px', align: 'end' },
+      ];
+      if (!isEmployee.value)
+        base.splice(2, 0, { title: 'Employee', key: 'employeeName', width: '150px' });
+      return base;
+    });
+
+    // ── Detail modal ─────────────────────────────────────────────────────
+    const showDetail    = ref(false);
+    const detailLoading = ref(false);
+    const selectedExp   = ref(null);
+
+    const openDetail = async (exp) => {
+      showDetail.value    = true;
+      detailLoading.value = true;
+      selectedExp.value   = exp;
+      try {
+        const full = await store.dispatch('expenses/fetchExpense', exp.referenceNumber);
+        selectedExp.value = full;
+      } catch (e) { console.error(e); }
+      finally { detailLoading.value = false; }
+    };
+    const closeDetail = () => { showDetail.value = false; selectedExp.value = null; };
+
+    // ── Active filter count for badge ─────────────────────────────────────
+    const activeFilterCount = computed(() => {
+      let count = 0;
+      if (filterSearch.value) count++;
+      if (filterType.value) count++;
+      if (filterProject.value) count++;
+      if (filterDateFrom.value) count++;
+      if (filterDateTo.value) count++;
+      if (filterQuick.value) count++;
+      return count;
+    });
+
+    // ── Clear all filters ────────────────────────────────────────────────
+    const clearAllFilters = () => {
+      filterSearch.value = '';
+      filterType.value = '';
+      filterProject.value = '';
+      filterDateFrom.value = '';
+      filterDateTo.value = '';
+      filterQuick.value = '';
+      showFilters.value = false;
+    };
+
+    // ── Create modal ─────────────────────────────────────────────────────
+    const showCreate    = ref(false);
+    const showFilters   = ref(false);
+    const createLoading = ref(false);
+    const editingExpense = ref(null);
+    const formStep      = ref(1);
+
+    const formProgress = computed(() => {
+      const f = createForm.value;
+      const step1 = f.expenseType && f.expenseDate && f.managerId;
+      const step2 = f.expenseType === 'ADVANCE' ? f.items.length > 0 : f.billItems.length > 0;
+      const step3 = f.expenseType === 'ADVANCE' && f.bankDetails?.accountName && f.bankDetails?.accountNumber && f.bankDetails?.ifsc;
+      let completed = 0;
+      if (step1) completed++;
+      if (step2) completed++;
+      if (step3) completed++;
+      return (completed / 3) * 100;
+    });
+
+    const blankForm = (linkedTicket = null) => ({
+      expenseType:   linkedTicket ? 'REIMBURSEMENT' : 'ADVANCE',
+      expenseDate:   new Date().toISOString().split('T')[0],
+      description:   '',
+      projectCode:   userProject.value || '',
+      managerId:     '',
+      referenceNote: linkedTicket ? 'Reimbursement for ticket ' + linkedTicket : '',
+      linkedTicketNumber: linkedTicket || '',
+      bankDetails:   { accountName: '', accountNumber: '', ifsc: '', bankName: '' },
+      items:         [],
+      billItems:     [],
+      billAttachments: [],
+      attachment:    null,
+      billSubmissionDate: new Date().toISOString().split('T')[0],
+      courierNumber: '',
+      courierType: ''
+    });
+    const createForm  = ref(blankForm());
+    const pendingItem = ref({
+      head: '',
+      subHead: '',
+      description: '',
+      amount: null,
+      customSubHead: '',
+      expenseDate: new Date().toISOString().split('T')[0]
+    });
+
+    const pendingBillItem = ref({
+      head: '',
+      subHead: '',
+      description: '',
+      amount: null,
+      customSubHead: '',
+      billDate: new Date().toISOString().split('T')[0],
+      billReferenceNumber: ''
+    });
+
+    const attachmentFile = ref(null);
+    const attachmentErrors = ref([]);
+    const billFiles = ref([]);
+    const billFileErrors = ref([]);
+
+    const FILE_LIMITS = { perFile: 5 * 1024 * 1024, maxFiles: 2, total: 20 * 1024 * 1024 };
+
+    const validateFile = (file) => {
+      if (file.type !== 'application/pdf') return 'Only PDF files allowed';
+      if (file.size > FILE_LIMITS.perFile) return 'File exceeds 5 MB limit';
+      return null;
+    };
+
+    const handleAttachmentInput = (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const err = validateFile(file);
+      if (err) {
+        attachmentErrors.value = [err];
+      } else {
+        attachmentFile.value = file;
+        attachmentErrors.value = [];
+      }
+      event.target.value = '';
+    };
+
+    const removeAttachment = () => { attachmentFile.value = null; };
+
+    const handleBillFileInput = (event) => {
+      const incoming = Array.from(event.target.files || []);
+      const errors = [];
+      const accepted = [];
+      let totalSize = billFiles.value.reduce((s, f) => s + f.size, 0);
+
+      for (const f of incoming) {
+        if (billFiles.value.length + accepted.length >= FILE_LIMITS.maxFiles) {
+          errors.push('Maximum ' + FILE_LIMITS.maxFiles + ' files allowed');
+          continue;
+        }
+        const err = validateFile(f);
+        if (err) { errors.push(f.name + ': ' + err); continue; }
+        if (totalSize + f.size > FILE_LIMITS.total) {
+          errors.push('Total size exceeds 20 MB');
+          break;
+        }
+        accepted.push(f);
+        totalSize += f.size;
+      }
+
+      billFileErrors.value = errors;
+      billFiles.value = [...billFiles.value, ...accepted];
+      event.target.value = '';
+    };
+
+    const removeBillFile = (i) => billFiles.value.splice(i, 1);
+
+    watch(() => pendingItem.value.head, () => {
+      pendingItem.value.subHead       = '';
+      pendingItem.value.customSubHead = '';
+    });
+
+    const pendingSubHeads      = computed(() => subHeadsFor(pendingItem.value.head));
+    const pendingSubHeadIsCustom = computed(() =>
+      pendingItem.value.subHead === 'Custom / Other' || pendingItem.value.head === 'Custom'
+    );
+
+    const appendItem = () => {
+      const it = pendingItem.value;
+      if (!it.head || !(it.amount > 0)) {
+        store.dispatch('ui/showSnackbar', {
+          message: 'Head and a valid amount are required.',
+          color: 'warning'
+        });
+        return;
+      }
+      
+      createForm.value.items.push({
+        head: it.head,
+        subHead: pendingSubHeadIsCustom.value ? (it.customSubHead || 'Custom') : it.subHead,
+        description: it.description,
+        amount: parseFloat(it.amount),
+        expenseDate: it.expenseDate || createForm.value.expenseDate  // NEW
+      });
+      
+      pendingItem.value = {
+        head: '',
+        subHead: '',
+        description: '',
+        amount: null,
+        customSubHead: '',
+        expenseDate: createForm.value.expenseDate  // NEW
+      };
+    };
+
+    const removeItem  = (i) => createForm.value.items.splice(i, 1);
+    const createTotal = computed(() =>
+      createForm.value.items.reduce((s, it) => s + (it.amount || 0), 0)
+    );
+
+    const billSubHeads = computed(() => subHeadsFor(pendingBillItem.value.head));
+    const billItemIsCustom = computed(() =>
+      pendingBillItem.value.subHead === 'Custom / Other' || pendingBillItem.value.head === 'Custom'
+    );
+
+    const appendBillItem = () => {
+      const it = pendingBillItem.value;
+      if (!it.head || !(it.amount > 0)) {
+        store.dispatch('ui/showSnackbar', { message: 'Head and amount required.', color: 'warning' });
+        return;
+      }
+      if (!it.billReferenceNumber || !it.billReferenceNumber.trim()) {
+        store.dispatch('ui/showSnackbar', { message: 'Bill reference number is required', color: 'warning' });
+        return;
+      }
+      createForm.value.billItems.push({
+        head: it.head,
+        subHead: billItemIsCustom.value ? (it.customSubHead || 'Custom') : it.subHead,
+        description: it.description,
+        amount: parseFloat(it.amount),
+        billDate: it.billDate,
+        billReferenceNumber: it.billReferenceNumber.trim()
+      });
+      pendingBillItem.value = {
+        head: '', subHead: '', description: '', amount: null, customSubHead: '',
+        billDate: createForm.value.billSubmissionDate, billReferenceNumber: ''
+      };
+    };
+
+    const removeBillItem = (i) => createForm.value.billItems.splice(i, 1);
+    const billTotal = computed(() =>
+      createForm.value.billItems.reduce((s, it) => s + (it.amount || 0), 0)
+    );
+
+    const openCreate = (linkedTicket = null) => {
+      createForm.value  = blankForm(linkedTicket);
+      pendingItem.value = {
+        head: '', subHead: '', description: '', amount: null, customSubHead: '',
+        expenseDate: createForm.value.expenseDate
+      };
+      pendingBillItem.value = {
+        head: '', subHead: '', description: '', amount: null, customSubHead: '',
+        billDate: createForm.value.billSubmissionDate
+      };
+      attachmentFile.value = null;
+      attachmentErrors.value = [];
+      billFiles.value = [];
+      billFileErrors.value = [];
+      showCreate.value  = true;
+    };
+
+    const openCreateReimbursement = (ticketNumber) => {
+      openCreate(ticketNumber);
+    };
+
+    const submitCreate = async () => {
+      try {
+        createLoading.value = true;
+
+        let attachmentData = null;
+        if (attachmentFile.value) {
+          attachmentData = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve({ name: attachmentFile.value.name, size: attachmentFile.value.size, type: attachmentFile.value.type, data: r.result.split(',')[1] });
+            r.onerror = reject;
+            r.readAsDataURL(attachmentFile.value);
+          });
+        }
+
+        let billAttachments = [];
+        if (billFiles.value.length) {
+          billAttachments = await Promise.all(billFiles.value.map(f => new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve({ name: f.name, size: f.size, type: f.type, data: r.result.split(',')[1] });
+            r.onerror = reject;
+            r.readAsDataURL(f);
+          })));
+        }
+
+        const payload = {
+          expenseType: createForm.value.expenseType,
+          expenseDate: createForm.value.expenseDate,
+          description: createForm.value.description,
+          projectCode: createForm.value.projectCode,
+          referenceNote: createForm.value.referenceNote,
+          linkedTicketNumber: createForm.value.linkedTicketNumber,
+          bankDetails: createForm.value.bankDetails,
+          expenseItems: createForm.value.items,
+          bills: createForm.value.billItems,
+          billSubmissionDate: createForm.value.billSubmissionDate,
+          courierNumber: createForm.value.courierNumber,
+          courierType: createForm.value.courierType,
+          attachment: attachmentData,
+          billAttachments: billAttachments
+        };
+
+        await store.dispatch('expenses/createExpense', payload);
+        showCreate.value = false;
+        resetCreateForm();
+        await store.dispatch('expenses/fetchExpenses');
+      } catch (e) {
+        // Error handled by store
+      } finally {
+        createLoading.value = false;
+      }
+    };
+
+    const resetCreateForm = () => {
+      createForm.value  = blankForm();
+      pendingItem.value = {
+        head: '',
+        subHead: '',
+        description: '',
+        amount: null,
+        customSubHead: '',
+        expenseDate: createForm.value.expenseDate
+      };
+    };
+
+    const openEdit = async (expense) => {
+      try {
+        // Fetch full expense details
+        const full = await store.dispatch('expenses/fetchExpense', expense.referenceNumber);
+        
+        // Pre-fill form with existing data
+        createForm.value = {
+          expenseType: full.expenseType,
+          expenseDate: full.expenseDate,
+          description: full.description || '',
+          projectCode: full.projectCode || '',
+          referenceNote: full.referenceNote || '',
+          managerId: full.managerId || full.reportingManagerId || '',
+          linkedTicketNumber: full.linkedTicketNumber || '',
+          bankDetails: full.bankDetails || blankForm().bankDetails,
+          items: full.items || [],
+          billItems: full.billItems || [],
+          billSubmissionDate: full.billSubmissionDate || new Date().toISOString().split('T')[0],
+          courierNumber: full.courierNumber || '',
+          courierType: full.courierType || ''
+        };
+        
+        editingExpense.value = full.referenceNumber;
+        showCreate.value = true;
+      } catch (e) {
+        console.error(e);
+        store.dispatch('ui/showSnackbar', {
+          message: 'Failed to load expense details',
+          color: 'error'
+        });
+      }
+    };
+
+    // ── Approve / Reject modal ───────────────────────────────────────────
+    const showApproval    = ref(false);
+    const approvalMode    = ref('approve');
+    const approvalExp     = ref(null);
+    const approvalRemark  = ref('');
+    const approvalLoading = ref(false);
+
+    const openApproval = (exp, mode) => {
+      approvalExp.value    = exp;
+      approvalMode.value   = mode;
+      approvalRemark.value = '';
+      showApproval.value   = true;
+    };
+
+    const submitApproval = async () => {
+      if (approvalMode.value === 'approve') {
+        // Handle both ADVANCE (items) and REIMBURSEMENT (billItems)
+        let items = [];
+        
+        if (approvalExp.value.expenseType === 'REIMBURSEMENT') {
+          items = approvalExp.value.billItems || [];
+        } else {
+          items = approvalExp.value.items || approvalExp.value.expenseItemsJSON || [];
+        }
+        
+        if (!items || items.length === 0) {
+          const itemType = approvalExp.value.expenseType === 'REIMBURSEMENT' ? 'bill items' : 'expense items';
+          await store.dispatch('ui/showSnackbar', {
+            message: `Cannot approve: expense has no ${itemType}`,
+            color: 'error',
+          });
+          return;
+        }
+        
+        await store.dispatch('expenses/approveExpense', {
+          referenceNumber: approvalExp.value.referenceNumber,
+          approvedItems:   items,
+          notes:           approvalRemark.value,
+        });
+      }
+      showApproval.value = false;
+      await store.dispatch('expenses/fetchExpenses');
+    };
+
+    // ⛔ REMOVED: showPayment / paymentForm / openPayment / submitPayment
+    // ⛔ REMOVED: hold/release moved to PaymentView
+
+    onMounted(async () => {
+      if (!allExpenses.value.length) await store.dispatch('expenses/fetchExpenses').catch(() => {});
+      if (!allUsers.value.length)    await store.dispatch('users/fetchUsers').catch(() => {});
+      
+      // Handle reimbursement query parameter from ticket
+      const reimbursementTicket = route.query.reimbursement;
+      if (reimbursementTicket) {
+        openCreateReimbursement(reimbursementTicket);
+        // Clear the query param to prevent re-opening on refresh
+        router.replace({ path: '/expenses' });
+      }
+    });
+
+    return {
+      mdAndDown, smAndDown, router,
+      isEmployee, isManager, canApprove, userEmail,
+      userName, userProject, managers,
+      allExpenses, filteredExpenses, myExpenses, currentTabExpenses, isLoading,
+      pendingExpenses, approvedExpenses,
+      activeTab, filterStatus, filterType, filterSearch,
+      filterDateFrom, filterDateTo, filterProject, filterQuick, activeFilterCount, showFilters,
+      clearAllFilters,
+      projectList,
+      selectedExpenses, toggleSelection, isSelected, selectAll,
+      getDaysPending,
+      headers, getStatusColor, fd, currencyFormat,
+      showDetail, detailLoading, selectedExp, openDetail, closeDetail,
+      showCreate, createLoading, createForm, pendingItem, editingExpense,
+      formStep, formProgress,
+      pendingSubHeads, pendingSubHeadIsCustom, EXPENSE_HEADS,
+      appendItem, removeItem, createTotal, openCreate, submitCreate, resetCreateForm, openEdit,
+      showApproval, approvalMode, approvalExp, approvalRemark, approvalLoading,
+      openApproval, submitApproval,
+      pendingBillItem, billSubHeads, billItemIsCustom, appendBillItem, removeBillItem, billTotal,
+      attachmentFile, attachmentErrors, handleAttachmentInput, removeAttachment,
+      billFiles, billFileErrors, handleBillFileInput, removeBillFile,
+      openCreateReimbursement
+    };
+  },
+
+  template: `
+  <div class="page-fade">
+    <v-container fluid class="pa-4 pa-md-6" :class="{ 'px-3': smAndDown }">
+
+      <!-- Page header -->
+      <div class="d-flex align-center mb-4">
+        <div>
+          <h1 class="text-h5 font-weight-bold mb-0">Expenses</h1>
+          <p class="text-body-2 text-medium-emphasis mb-0">Manage and track expense requests</p>
+        </div>
+        <v-spacer />
+        <v-btn color="primary" rounded="lg" size="small" prepend-icon="mdi-plus"
+          @click="() => openCreate()" elevation="0">
+          New Expense
+        </v-btn>
+      </div>
+
+      <!-- Quick Filter Chips -->
+      <div class="d-flex flex-wrap gap-2 mb-3">
+        <v-chip 
+          :color="filterQuick === '' ? 'primary' : 'default'" 
+          :variant="filterQuick === '' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = ''">
+          All
+        </v-chip>
+        <v-chip 
+          :color="filterQuick === 'myPending' ? 'warning' : 'default'"
+          :variant="filterQuick === 'myPending' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = 'myPending'">
+          My Pending
+        </v-chip>
+        <v-chip 
+          :color="filterQuick === 'myApproved' ? 'success' : 'default'"
+          :variant="filterQuick === 'myApproved' ? 'flat' : 'outlined'"
+          size="small" @click="filterQuick = 'myApproved'">
+          My Approved
+        </v-chip>
+      </div>
+
+      <!-- Filters toggle button (mobile only) -->
+      <div v-if="smAndDown" class="d-flex justify-end mb-2">
+        <v-btn size="small" variant="outlined" rounded="lg"
+          prepend-icon="mdi-filter-outline"
+          @click="showFilters = !showFilters">
+          {{ showFilters ? 'Hide Filters' : 'Filters' }}
+          <v-badge v-if="activeFilterCount" :content="activeFilterCount"
+            color="primary" inline/>
+        </v-btn>
+      </div>
+
+      <!-- Filters row -->
+      <v-expand-transition>
+        <v-card v-if="!smAndDown || showFilters" rounded="lg" elevation="0" border class="mb-4 pa-3">
+          <v-row dense align="center">
+            <v-col cols="12" sm="3">
+              <v-text-field v-model="filterSearch" placeholder="Search ref / name..."
+                density="compact" variant="outlined" hide-details
+                prepend-inner-icon="mdi-magnify" clearable />
+            </v-col>
+            <v-col cols="6" sm="2">
+              <v-select v-model="filterType"
+                :items="['','ADVANCE','REIMBURSEMENT']"
+                label="Type" density="compact" variant="outlined" hide-details clearable />
+            </v-col>
+            <v-col cols="6" sm="2">
+              <v-select v-model="filterProject"
+                :items="projectList"
+                label="Project" density="compact" variant="outlined" hide-details clearable />
+            </v-col>
+            <v-col cols="6" sm="2">
+              <v-text-field v-model="filterDateFrom" type="date" label="From Date"
+                density="compact" variant="outlined" hide-details clearable />
+            </v-col>
+            <v-col cols="6" sm="2">
+              <v-text-field v-model="filterDateTo" type="date" label="To Date"
+                density="compact" variant="outlined" hide-details clearable />
+            </v-col>
+            <v-col cols="12" sm="1">
+              <v-btn variant="text" size="small" @click="filterSearch=''; filterType=''; filterProject=''; filterDateFrom=''; filterDateTo=''; filterQuick=''; showFilters=false" title="Clear filters">
+                <v-icon>mdi-filter-remove</v-icon>
+              </v-btn>
+            </v-col>
+          </v-row>
+        </v-card>
+      </v-expand-transition>
+
+      <!-- Filter status line -->
+      <div class="d-flex align-center justify-space-between mb-2 px-1">
+        <span class="text-caption text-medium-emphasis">
+          Showing {{ filteredExpenses.length }} of {{ allExpenses.length }} expenses
+        </span>
+        <v-chip v-if="activeFilterCount" size="x-small" color="primary"
+          variant="tonal" closable @click:close="clearAllFilters">
+          {{ activeFilterCount }} filter{{ activeFilterCount > 1 ? 's' : '' }} active
+        </v-chip>
+      </div>
+
+      <!-- 3-Tab Structure: Pending / Approved / All -->
+      <v-tabs v-model="activeTab" color="primary" density="compact" class="mb-3">
+        <v-tab value="pending">
+          <v-icon size="16" start>mdi-clock-outline</v-icon>
+          Pending
+          <v-chip size="x-small" color="warning" variant="tonal" class="ml-1">{{ pendingExpenses.length }}</v-chip>
+        </v-tab>
+        <v-tab value="approved">
+          <v-icon size="16" start>mdi-check-circle-outline</v-icon>
+          Approved
+          <v-chip size="x-small" color="success" variant="tonal" class="ml-1">{{ approvedExpenses.length }}</v-chip>
+        </v-tab>
+        <v-tab value="all">
+          <v-icon size="16" start>mdi-format-list-bulleted</v-icon>
+          All Expenses
+        </v-tab>
+      </v-tabs>
+
+      <!-- Desktop table / Mobile card view -->
+      <v-card v-if="!smAndDown" rounded="lg" elevation="0" border>
+        <v-data-table
+          :headers="headers"
+          :items="filteredExpenses"
+          :loading="isLoading"
+          density="compact"
+          hover
+        >
+          <template #item.checkbox="{ item }">
+            <v-checkbox-btn 
+              :model-value="isSelected(item.referenceNumber)"
+              @update:model-value="toggleSelection(item)"
+              color="primary"
+            />
+          </template>
+          <template #item.expenseType="{ item }">
+            <v-chip size="x-small" color="primary" variant="tonal" label>{{ item.expenseType }}</v-chip>
+          </template>
+          <template #item.totalAmount="{ item }">
+            <span class="font-weight-medium">&#8377;{{ (item.totalAmount||0).toLocaleString('en-IN') }}</span>
+          </template>
+          <template #item.expenseStatus="{ item }">
+            <v-chip size="x-small" :color="getStatusColor(item.expenseStatus)" variant="tonal" label>
+              {{ $utils.statusLabel(item.expenseStatus) }}
+            </v-chip>
+          </template>
+          <template #item.currentStage="{ item }">
+            <span class="text-caption text-medium-emphasis">{{ item.currentStage || '&#8212;' }}</span>
+          </template>
+          <template #item.linkedTicketNumber="{ item }">
+            <v-chip v-if="item.linkedTicketNumber" size="x-small" color="warning" variant="tonal" label>
+              {{ item.linkedTicketNumber }}
+            </v-chip>
+            <span v-else class="text-caption text-medium-emphasis">&#8212;</span>
+          </template>
+          <template #item.daysPending="{ item }">
+            <span class="text-caption" :class="getDaysPending(item.createdAt).includes('day') && !getDaysPending(item.createdAt).startsWith('1') ? 'text-warning' : ''">
+              {{ getDaysPending(item.createdAt) }}
+            </span>
+          </template>
+          <template #item.createdAt="{ item }">
+            <span class="text-caption">{{ fd(item.createdAt) }}</span>
+          </template>
+          <template #item.actions="{ item }">
+            <div class="d-flex gap-1 justify-end">
+              <v-btn icon size="x-small" variant="text" @click="openDetail(item)">
+                <v-icon size="16">mdi-eye-outline</v-icon>
+              </v-btn>
+              <v-btn v-if="canApprove && item.expenseStatus === 'SUBMITTED'"
+                icon size="x-small" variant="text" color="success"
+                @click.stop="openApproval(item, 'approve')" title="Quick Approve">
+                <v-icon size="16">mdi-check-circle-outline</v-icon>
+              </v-btn>
+            </div>
+          </template>
+        </v-data-table>
+      </v-card>
+
+      <div v-else class="pa-2">
+        <div v-if="isLoading" class="text-center pa-8">
+          <v-progress-circular indeterminate color="primary"/>
+        </div>
+        <template v-else>
+          <div v-if="!filteredExpenses.length" class="text-center pa-8 text-medium-emphasis">
+            <v-icon size="40" class="mb-2">mdi-receipt-outline</v-icon>
+            <div class="text-body-2">No expenses found</div>
+          </div>
+          <v-card v-for="item in filteredExpenses" :key="item.referenceNumber"
+            flat border rounded="xl" class="mb-2 pa-3 cursor-pointer"
+            @click="openDetail(item)">
+            <div class="d-flex align-center justify-space-between mb-1">
+              <span class="text-caption font-weight-bold" style="font-family:monospace">
+                {{ item.referenceNumber }}
+              </span>
+              <v-chip :color="getStatusColor(item.expenseStatus)"
+                size="x-small" variant="tonal" label>
+                {{ $utils.statusLabel(item.expenseStatus) }}
+              </v-chip>
+            </div>
+            <div class="d-flex align-center justify-space-between">
+              <span class="text-body-2 text-medium-emphasis">{{ item.employeeName }}</span>
+              <span class="text-body-1 font-weight-bold">
+                &#8377;{{ (item.totalAmount||0).toLocaleString('en-IN') }}
+              </span>
+            </div>
+            <div class="d-flex align-center gap-2 mt-1">
+              <v-chip size="x-small" color="primary" variant="tonal" label>
+                {{ item.expenseType }}
+              </v-chip>
+              <span class="text-caption text-medium-emphasis">{{ fd(item.createdAt) }}</span>
+              <v-chip v-if="item.linkedTicketNumber" size="x-small" color="deep-purple" variant="tonal" label>
+                {{ item.linkedTicketNumber }}
+              </v-chip>
+            </div>
+          </v-card>
+        </template>
+      </div>
+    </v-container>
+
+
+    <!-- ════════════════════════════════════════════════════════
+         EXPENSE DETAIL MODAL
+         ✅ No payment props passed — canProcessPayments / ticketStatus removed
+         ════════════════════════════════════════════════════════ -->
+    <expense-detail-modal
+      v-model="showDetail"
+      :expense="selectedExp"
+      :loading="detailLoading"
+      :can-approve="canApprove"
+      @close="closeDetail"
+      @approve="e => openApproval(e, 'approve')"
+      @reject="e  => openApproval(e, 'reject')"
+    />
+
+
+    <!-- ════════════════════════════════════════════════════════
+         CREATE EXPENSE MODAL
+         ════════════════════════════════════════════════════════ -->
+    <v-dialog v-model="showCreate" max-width="760" scrollable persistent class="bottom-sheet">
+      <v-card rounded="xl">
+        <v-toolbar color="surface" flat class="px-2" border="b">
+          <v-toolbar-title class="text-body-2 font-weight-bold">
+            New Expense Request
+          </v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showCreate = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+        <v-progress-linear
+          :model-value="formProgress"
+          color="primary" height="2" />
+        <div class="d-flex justify-center gap-1 pa-2">
+          <div :class="['rounded-circle', formProgress >= 33 ? 'bg-primary' : 'bg-grey-lighten-2']" style="width:8px;height:8px"></div>
+          <div :class="['rounded-circle', formProgress >= 66 ? 'bg-primary' : 'bg-grey-lighten-2']" style="width:8px;height:8px"></div>
+          <div :class="['rounded-circle', formProgress >= 100 ? 'bg-primary' : 'bg-grey-lighten-2']" style="width:8px;height:8px"></div>
+        </div>
+
+        <v-card-text class="pa-4" style="max-height:78vh;overflow-y:auto">
+
+          <!-- SECTION 1: Core Info -->
+          <div class="section-label mt-4 mb-3">REQUEST INFO</div>
+          <v-row dense>
+            <v-col cols="12" sm="6">
+              <v-select v-model="createForm.expenseType"
+                :items="['ADVANCE','REIMBURSEMENT']"
+                label="Expense Type *" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-text-field v-model="createForm.expenseDate"
+                label="Expense Date *" type="date" density="compact" variant="outlined" />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-text-field v-model="createForm.projectCode"
+                label="Project Code" density="compact" variant="outlined"
+                hint="Pre-filled from your profile" persistent-hint />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-select v-model="createForm.managerId"
+                :items="managers" item-title="name" item-value="email"
+                label="Reporting Manager *" density="compact" variant="outlined" clearable>
+                <template #item="{ item, props }">
+                  <v-list-item v-bind="props" :subtitle="item.raw.jobTitle || item.raw.role || ''" />
+                </template>
+              </v-select>
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-text-field v-model="createForm.referenceNote"
+                label="Your Reference Note" density="compact" variant="outlined"
+                placeholder="Internal ref / PO number" />
+            </v-col>
+            <v-col cols="12">
+              <v-textarea v-model="createForm.description"
+                label="Overall Description / Purpose *"
+                density="compact" variant="outlined" rows="2" auto-grow />
+            </v-col>
+          </v-row>
+
+          <!-- Bill Submission Details for REIMBURSEMENT -->
+          <template v-if="createForm.expenseType === 'REIMBURSEMENT'">
+            <div class="section-label mt-4 mb-3">BILL SUBMISSION DETAILS</div>
+            <v-row dense>
+              <!-- Bill Submission Date -->
+              <v-col cols="12" sm="4">
+                <v-text-field
+                  v-model="createForm.billSubmissionDate"
+                  type="date"
+                  label="Bill Submission Date *"
+                  density="compact"
+                  variant="outlined"
+                  prepend-inner-icon="mdi-calendar"
+                />
+              </v-col>
+              
+              <!-- Courier Number -->
+              <v-col cols="12" sm="4">
+                <v-text-field
+                  v-model="createForm.courierNumber"
+                  label="Courier Tracking Number"
+                  density="compact"
+                  variant="outlined"
+                  prepend-inner-icon="mdi-truck-delivery"
+                  placeholder="TRK123456"
+                />
+              </v-col>
+              
+              <!-- Courier Partner -->
+              <v-col cols="12" sm="4">
+                <v-select
+                  v-model="createForm.courierType"
+                  :items="['BlueDart', 'DTDC', 'FedEx', 'DHL', 'India Post', 'Delhivery', 'Other']"
+                  label="Courier Partner"
+                  density="compact"
+                  variant="outlined"
+                  prepend-inner-icon="mdi-package-variant"
+                />
+              </v-col>
+            </v-row>
+
+            <!-- Bill Items for REIMBURSEMENT -->
+            <div class="section-label mt-4 mb-3">BILL ITEMS</div>
+            <v-card rounded="lg" elevation="0" border class="pa-3 mb-3" style="background: rgba(var(--v-theme-primary), 0.03);">
+              <div class="text-caption text-medium-emphasis mb-2 font-weight-bold">ADD BILL ITEM</div>
+              <v-row dense>
+                <v-col cols="12" sm="4">
+                  <v-select v-model="pendingBillItem.head"
+                    :items="EXPENSE_HEADS" label="Head *" density="compact" variant="outlined"
+                    prepend-inner-icon="mdi-format-list-bulleted-type" />
+                </v-col>
+                <v-col cols="12" sm="4">
+                  <v-select v-model="pendingBillItem.subHead"
+                    :items="billSubHeads" label="Sub-Head" density="compact" variant="outlined"
+                    :disabled="!pendingBillItem.head" />
+                </v-col>
+                <v-col cols="12" sm="4">
+                  <v-text-field v-model.number="pendingBillItem.amount"
+                    label="Amount (Rs) *" type="number" density="compact" variant="outlined" prefix="Rs" />
+                </v-col>
+                <v-col cols="12" sm="3">
+                  <v-text-field v-model="pendingBillItem.billDate"
+                    type="date" label="Bill Date *" density="compact" variant="outlined" />
+                </v-col>
+                <v-col cols="12" sm="4">
+                  <v-text-field v-model="pendingBillItem.billReferenceNumber"
+                    label="Bill Reference Number *" density="compact" variant="outlined"
+                    placeholder="e.g., INV-2025-001"
+                    hint="Match this with the bill attachment"
+                    persistent-hint />
+                </v-col>
+                <v-col cols="12" sm="5">
+                  <v-text-field v-if="billItemIsCustom" v-model="pendingBillItem.customSubHead"
+                    label="Custom Sub-Head Label *" density="compact" variant="outlined" class="mb-2" />
+                  <v-text-field v-model="pendingBillItem.description"
+                    label="Description / Notes" density="compact" variant="outlined" />
+                </v-col>
+                <v-col cols="12" sm="4" class="d-flex align-end">
+                  <v-btn color="info" variant="tonal" rounded="lg" size="small" block
+                    @click="appendBillItem" prepend-icon="mdi-plus">
+                    Add Bill
+                  </v-btn>
+                </v-col>
+              </v-row>
+            </v-card>
+
+            <v-table v-if="createForm.billItems.length" density="compact" class="rounded-lg border mb-3">
+              <thead>
+                <tr>
+                  <th class="text-left text-caption">#</th>
+                  <th class="text-left text-caption">Ref #</th>
+                  <th class="text-left text-caption">Head</th>
+                  <th class="text-left text-caption">Sub-Head</th>
+                  <th class="text-left text-caption">Bill Date</th>
+                  <th class="text-left text-caption">Description</th>
+                  <th class="text-right text-caption">Amount</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(it, i) in createForm.billItems" :key="i">
+                  <td class="text-caption text-medium-emphasis">{{ i+1 }}</td>
+                  <td class="font-weight-medium">{{ it.billReferenceNumber }}</td>
+                  <td><v-chip size="x-small" color="info" variant="tonal" label>{{ it.head }}</v-chip></td>
+                  <td class="text-caption">{{ it.subHead || '—' }}</td>
+                  <td class="text-caption">{{ fd(it.billDate) }}</td>
+                  <td class="text-caption text-medium-emphasis">{{ it.description || '—' }}</td>
+                  <td class="text-right font-weight-medium text-body-2">&#8377;{{ it.amount.toLocaleString('en-IN') }}</td>
+                  <td class="text-right">
+                    <v-btn icon size="x-small" variant="text" color="error" @click="removeBillItem(i)">
+                      <v-icon size="14">mdi-delete-outline</v-icon>
+                    </v-btn>
+                  </td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr class="bg-surface">
+                  <td colspan="7" class="text-right text-body-2 font-weight-bold pa-2">Total</td>
+                  <td class="text-right font-weight-bold text-body-1 pa-2 text-success">
+                    &#8377;{{ billTotal.toLocaleString('en-IN') }}
+                  </td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </v-table>
+            <v-alert v-if="createForm.expenseType === 'REIMBURSEMENT' && !createForm.billItems.length" type="info" variant="tonal" density="compact" class="mb-3">
+              Add at least one bill with reference number and attachment
+            </v-alert>
+
+            <!-- Bill Attachments for REIMBURSEMENT -->
+            <div class="section-label mt-4 mb-3">PDF ATTACHMENTS</div>
+            <v-alert v-if="billFileErrors.length" type="error" variant="tonal" density="compact" class="mb-2">
+              <div v-for="e in billFileErrors" :key="e">{{ e }}</div>
+            </v-alert>
+            <div class="bill-upload-zone mb-3" @click="$refs.billFileInput.click()">
+              <v-icon size="32" color="grey">mdi-file-pdf-box</v-icon>
+              <div class="text-body-2 mt-1">Click to attach PDF bills</div>
+              <div class="text-caption text-medium-emphasis">Max 2 files · 5 MB each · 20 MB total</div>
+              <input ref="billFileInput" type="file" accept="application/pdf" multiple style="display:none" @change="handleBillFileInput" />
+            </div>
+            <div v-if="billFiles.length" class="d-flex flex-column gap-2 mb-3">
+              <v-card v-for="(f, i) in billFiles" :key="i" rounded="lg" elevation="0" border class="pa-2">
+                <div class="d-flex align-center">
+                  <v-icon color="error" size="20" class="mr-2">mdi-file-pdf-box</v-icon>
+                  <div class="flex-1 min-width-0">
+                    <div class="text-body-2 font-weight-medium text-truncate">{{ f.name }}</div>
+                    <div class="text-caption text-medium-emphasis">{{ (f.size/1024/1024).toFixed(2) }} MB</div>
+                  </div>
+                  <v-btn icon size="x-small" variant="text" color="error" @click="removeBillFile(i)">
+                    <v-icon size="14">mdi-close</v-icon>
+                  </v-btn>
+                </div>
+              </v-card>
+            </div>
+          </template>
+
+          <!-- SECTION 3: Bank Details (ADVANCE only) -->
+          <template v-if="createForm.expenseType === 'ADVANCE'">
+
+
+            <!-- Expense Items for ADVANCE -->
+            <div class="section-label mt-4 mb-3">EXPENSE ITEMS</div>
+            <v-card rounded="lg" elevation="0" border class="pa-3 mb-3" style="background: rgba(var(--v-theme-primary), 0.03);">
+              <div class="text-caption text-medium-emphasis mb-2 font-weight-bold">ADD EXPENSE ITEM</div>
+              <div class="add-item-row mb-3">
+                <v-row dense>
+                  <!-- Row 1: Head, Sub-Head, Amount -->
+                  <v-col cols="12" sm="4">
+                    <v-select v-model="pendingItem.head"
+                      :items="EXPENSE_HEADS" 
+                      label="Head *" 
+                      density="compact" 
+                      variant="outlined"
+                      prepend-inner-icon="mdi-format-list-bulleted-type" />
+                  </v-col>
+                  <v-col cols="12" sm="4">
+                    <v-select v-model="pendingItem.subHead"
+                      :items="pendingSubHeads" 
+                      label="Sub-Head" 
+                      density="compact" 
+                      variant="outlined"
+                      :disabled="!pendingItem.head" />
+                  </v-col>
+                  <v-col cols="12" sm="4">
+                    <v-text-field v-model.number="pendingItem.amount"
+                      label="Amount (Rs) *" 
+                      type="number" 
+                      density="compact" 
+                      variant="outlined" 
+                      prefix="Rs" />
+                  </v-col>
+                  
+                  <!-- Row 2: Expense Date, Description, Add Button -->
+                  <v-col cols="12" sm="3">
+                    <v-text-field v-model="pendingItem.expenseDate"
+                      type="date" 
+                      label="Expense Date *" 
+                      density="compact" 
+                      variant="outlined" />
+                  </v-col>
+                  <v-col cols="12" sm="6">
+                    <v-text-field v-if="pendingSubHeadIsCustom" 
+                      v-model="pendingItem.customSubHead"
+                      label="Custom Sub-Head Label *" 
+                      density="compact" 
+                      variant="outlined" 
+                      class="mb-2" />
+                    <v-text-field v-model="pendingItem.description"
+                      label="Description / Notes" 
+                      density="compact" 
+                      variant="outlined" />
+                  </v-col>
+                  <v-col cols="12" sm="3" class="d-flex align-end">
+                    <v-btn color="info" 
+                      variant="tonal" 
+                      rounded="lg" 
+                      size="small" 
+                      block
+                      @click="appendItem" 
+                      prepend-icon="mdi-plus">
+                      Add Item
+                    </v-btn>
+                  </v-col>
+                </v-row>
+              </div>
+            </v-card>
+
+            <v-chip v-if="createForm.items.length" color="primary" variant="tonal" size="small" class="mb-2">
+              Total: &#8377;{{ createTotal.toLocaleString('en-IN') }}
+            </v-chip>
+
+            <!-- Desktop view -->
+            <v-table v-if="!$vuetify.display.smAndDown && createForm.items.length" density="compact" class="rounded-lg border mb-3">
+              <thead>
+                <tr>
+                  <th class="text-left text-caption">#</th>
+                  <th class="text-left text-caption">Head</th>
+                  <th class="text-left text-caption">Sub-Head</th>
+                  <th class="text-left text-caption">Date</th>
+                  <th class="text-left text-caption">Description</th>
+                  <th class="text-right text-caption">Amount</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(it, i) in createForm.items" :key="i">
+                  <td class="text-caption text-medium-emphasis">{{ i+1 }}</td>
+                  <td><v-chip size="x-small" color="info" variant="tonal" label>{{ it.head }}</v-chip></td>
+                  <td class="text-caption">{{ it.subHead || '—' }}</td>
+                  <td class="text-caption">{{ fd(it.expenseDate) }}</td>
+                  <td class="text-caption text-medium-emphasis">{{ it.description || '—' }}</td>
+                  <td class="text-right font-weight-medium text-body-2">&#8377;{{ it.amount.toLocaleString('en-IN') }}</td>
+                  <td class="text-right">
+                    <v-btn icon size="x-small" variant="text" color="error" @click="removeItem(i)">
+                      <v-icon size="14">mdi-delete-outline</v-icon>
+                    </v-btn>
+                  </td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr class="bg-surface">
+                  <td colspan="4" class="text-right text-body-2 font-weight-bold pa-2">Total</td>
+                  <td class="text-right font-weight-bold text-body-1 pa-2 text-success">
+                    &#8377;{{ createTotal.toLocaleString('en-IN') }}
+                  </td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </v-table>
+
+            <!-- Mobile view -->
+            <div v-if="$vuetify.display.smAndDown && createForm.items.length">
+              <v-card v-for="(it, i) in createForm.items" :key="i" rounded="lg" elevation="0" border class="pa-3 mb-3">
+                <div class="d-flex justify-space-between align-start mb-2">
+                  <div class="d-flex gap-2 flex-wrap flex-grow-1">
+                    <v-chip size="x-small" color="info" variant="tonal" label>{{ it.head }}</v-chip>
+                    <span class="text-caption text-medium-emphasis">{{ fd(it.expenseDate) }}</span>
+                  </div>
+                  <v-btn icon size="x-small" variant="text" color="error" @click="removeItem(i)">
+                    <v-icon size="14">mdi-delete-outline</v-icon>
+                  </v-btn>
+                </div>
+                <div v-if="it.subHead" class="text-caption mb-1">
+                  <span class="text-medium-emphasis">Sub-Head:</span> {{ it.subHead }}
+                </div>
+                <div v-if="it.description" class="text-caption mb-2">
+                  <span class="text-medium-emphasis">Description:</span> {{ it.description }}
+                </div>
+                <div class="text-right font-weight-medium text-body-2 text-success">
+                  &#8377;{{ it.amount.toLocaleString('en-IN') }}
+                </div>
+              </v-card>
+              <v-card rounded="lg" elevation="0" border class="pa-3 bg-surface">
+                <div class="text-right text-body-2 font-weight-bold">
+                  Total: <span class="text-success">&#8377;{{ createTotal.toLocaleString('en-IN') }}</span>
+                </div>
+              </v-card>
+            </div>
+
+            <div class="section-label mt-4 mb-3">OPTIONAL ATTACHMENT</div>
+              <v-alert v-if="attachmentErrors.length" type="error" variant="tonal" density="compact" class="mb-2">
+                <div v-for="e in attachmentErrors" :key="e">{{ e }}</div>
+              </v-alert>
+              <div class="bill-upload-zone mb-3" @click="$refs.attachmentInput.click()">
+                <v-icon size="32" color="grey">mdi-file-pdf-box</v-icon>
+                <div class="text-body-2 mt-1">Click to attach reference PDF (optional)</div>
+                <div class="text-caption text-medium-emphasis">Max 5 MB</div>
+                <input ref="attachmentInput" type="file" accept="application/pdf" style="display:none" @change="handleAttachmentInput" />
+              </div>
+              <div v-if="attachmentFile" class="mb-3">
+                <v-card rounded="lg" elevation="0" border class="pa-2">
+                  <div class="d-flex align-center">
+                    <v-icon color="error" size="20" class="mr-2">mdi-file-pdf-box</v-icon>
+                    <div class="flex-1 min-width-0">
+                      <div class="text-body-2 font-weight-medium text-truncate">{{ attachmentFile.name }}</div>
+                      <div class="text-caption text-medium-emphasis">{{ (attachmentFile.size/1024/1024).toFixed(2) }} MB</div>
+                    </div>
+                    <v-btn icon size="x-small" variant="text" color="error" @click="removeAttachment">
+                      <v-icon size="14">mdi-close</v-icon>
+                    </v-btn>
+                  </div>
+                </v-card>
+            </div>
+
+            <v-alert v-if="!createForm.items.length" type="info" variant="tonal" density="compact" class="mb-3">
+              Add at least one expense item using the form above.
+            </v-alert>
+
+            <div class="section-label mt-4 mb-3">BANK DETAILS (for fund transfer)</div>
+            <v-row dense>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model="createForm.bankDetails.accountName"
+                  label="Account Name" density="compact" variant="outlined" />
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model="createForm.bankDetails.accountNumber"
+                  label="Account Number" density="compact" variant="outlined" />
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model="createForm.bankDetails.ifsc"
+                  label="IFSC Code" density="compact" variant="outlined" />
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model="createForm.bankDetails.bankName"
+                  label="Bank Name" density="compact" variant="outlined" />
+              </v-col>
+            </v-row>
+         
+          </template>
+
+        </v-card-text>
+
+        <v-card-actions class="pa-3 border-t">
+          <div :class="smAndDown ? 'd-flex flex-column gap-2 w-100' : 'd-flex align-center w-100'">
+            <div class="text-body-2 text-medium-emphasis">
+              <template v-if="createForm.expenseType === 'ADVANCE'">
+                {{ createForm.items.length }} item(s) · Total &#8377;{{ createTotal.toLocaleString('en-IN') }}
+              </template>
+              <template v-else>
+                {{ createForm.billItems.length }} bill(s) · Total &#8377;{{ billTotal.toLocaleString('en-IN') }}
+              </template>
+            </div>
+            <v-spacer v-if="!smAndDown"/>
+            <v-btn variant="text" :block="smAndDown" @click="showCreate = false">Cancel</v-btn>
+            <v-btn color="primary" variant="flat" rounded="lg"
+              :block="smAndDown"
+              :loading="createLoading"
+              :disabled="createForm.expenseType === 'ADVANCE' ? !createForm.items.length : !createForm.billItems.length"
+              prepend-icon="mdi-send"
+              @click="submitCreate">
+              Submit Request
+            </v-btn>
+          </div>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+
+    <!-- ════════════════════════════════════════════════════════
+         APPROVAL / REJECTION MODAL
+         ════════════════════════════════════════════════════════ -->
+    <v-dialog v-model="showApproval" max-width="520" class="bottom-sheet" scrollable>
+      <v-card v-if="approvalExp" rounded="xl">
+        <v-toolbar density="compact" color="surface" flat border="b" class="px-2">
+          <v-icon class="mr-2">{{ approvalMode === 'approve' ? 'mdi-check-circle' : 'mdi-alert-circle' }}</v-icon>
+          <v-toolbar-title class="text-body-1 font-weight-bold">
+            {{ approvalMode === 'approve' ? 'Approve Expense' : 'Reject Expense' }}
+          </v-toolbar-title>
+          <v-spacer />
+          <v-btn icon size="small" variant="text" @click="showApproval = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-toolbar>
+
+        <v-card-text class="pa-4">
+          <!-- Summary -->
+          <div class="mb-4 pb-3 border-b">
+            <div class="text-body-2 font-weight-bold mb-2">{{ approvalExp.referenceNumber }}</div>
+            <div class="d-flex gap-3 text-caption">
+              <span class="text-medium-emphasis">Employee: <strong>{{ approvalExp.employeeName }}</strong></span>
+              <span class="text-medium-emphasis">Total: <strong class="text-success">₹{{ (approvalExp.totalAmount||0).toLocaleString('en-IN') }}</strong></span>
+            </div>
+          </div>
+
+          <!-- Items mini summary (approval mode only) -->
+          <div v-if="approvalMode === 'approve' && approvalExp.items?.length" class="mb-4">
+            <div class="section-label mb-2">ITEMS TO APPROVE</div>
+            <v-table density="compact" class="rounded-lg border mb-3">
+              <thead>
+                <tr>
+                  <th class="text-caption">Head</th>
+                  <th class="text-caption">Amount</th>
+                  <th class="text-caption">Approved</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(it, i) in approvalExp.items" :key="i">
+                  <td class="text-caption"><v-chip size="x-small" color="primary" variant="tonal" label>{{ it.head }}</v-chip></td>
+                  <td class="text-right text-caption">₹{{ (it.amount||0).toLocaleString('en-IN') }}</td>
+                  <td class="text-right">
+                    <v-text-field v-model.number="it.approvedAmount"
+                      type="number" density="compact" variant="outlined" hide-details
+                      class="w-24" style="max-width:100px" />
+                  </td>
+                </tr>
+              </tbody>
+            </v-table>
+          </div>
+
+          <!-- Rejection warning banner -->
+          <v-alert v-if="approvalMode === 'reject'"
+            type="warning" variant="tonal" density="compact" class="mb-3"
+            icon="mdi-alert-circle-outline">
+            This expense will be returned to the employee for correction.<br/>
+            Please give a clear reason.
+          </v-alert>
+
+          <!-- Remarks / Rejection reason -->
+          <v-textarea v-model="approvalRemark"
+            :label="approvalMode === 'approve' ? 'Approval Remarks (optional)' : 'Rejection Reason *'"
+            density="compact" variant="outlined" rows="3" auto-grow />
+        </v-card-text>
+
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn variant="text" size="small" @click="showApproval = false">Cancel</v-btn>
+          <v-btn :color="approvalMode === 'approve' ? 'success' : 'error'"
+            variant="flat" size="small" rounded="lg"
+            :loading="approvalLoading"
+            :disabled="approvalMode === 'reject' && !approvalRemark.trim()"
+            @click="submitApproval">
+            Confirm {{ approvalMode === 'approve' ? 'Approval' : 'Rejection' }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- ⛔ REMOVED: Payment Modal, Hold/Release Modals (moved to PaymentView) -->
+
+  </div>`
+};
+
+</script>
+

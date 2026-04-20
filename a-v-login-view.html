@@ -1,0 +1,82 @@
+<script>
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. LOGIN VIEW
+// ═══════════════════════════════════════════════════════════════════════════
+const LoginView = {
+  name: 'LoginView',
+  setup() {
+    const store  = useStore();
+    const router = useRouter();
+
+    const form         = ref({ email: '', password: '' });
+    const valid        = ref(false);
+    const showPassword = ref(false);
+    const formRef      = ref(null);
+    const isLoading    = computed(() => store.state.ui.loading);
+
+    const rules = {
+      required: v => !!v || 'Required',
+      email:    v => /.+@.+\..+/.test(v) || 'Invalid email',
+    };
+
+    const login = async () => {
+      const { valid: ok } = await formRef.value.validate();
+      if (!ok) return;
+      try {
+        await store.dispatch('auth/login', { email: form.value.email.trim(), password: form.value.password });
+        router.push('/');
+      } catch (e) { console.error('Login failed', e); }
+    };
+
+    return { form, valid, showPassword, formRef, isLoading, rules, login };
+  },
+  template: `
+  <div class="login-bg">
+    <v-container class="fill-height d-flex align-center justify-center" fluid>
+      <v-row align="center" justify="center">
+        <v-col cols="12" sm="8" md="5" lg="4" xl="3">
+          <v-card class="pa-6" elevation="3" rounded="xl">
+            <div class="text-center mb-6">
+              <v-avatar color="primary" size="52" class="mb-3">
+                <v-icon size="24" color="white">mdi-clipboard-check-outline</v-icon>
+              </v-avatar>
+              <h1 class="text-h5 font-weight-bold mb-1">Welcome Back</h1>
+              <p class="text-body-2 text-medium-emphasis">Expense Management System</p>
+            </div>
+            <v-form ref="formRef" v-model="valid" @submit.prevent="login">
+              <v-text-field v-model="form.email" label="Email Address" :rules="[rules.required]"
+                prepend-inner-icon="mdi-email-outline" variant="outlined" density="comfortable" class="mb-3" />
+              <v-text-field v-model="form.password" label="Password" :rules="[rules.required]"
+                :type="showPassword ? 'text' : 'password'"
+                :append-inner-icon="showPassword ? 'mdi-eye' : 'mdi-eye-off'"
+                @click:append-inner="showPassword = !showPassword"
+                prepend-inner-icon="mdi-lock-outline" variant="outlined" density="comfortable" class="mb-6" />
+              <v-btn block size="large" rounded="lg" color="primary" type="submit"
+                :loading="isLoading" :disabled="!valid || isLoading" elevation="0" class="font-weight-bold">
+                Sign In <v-icon end>mdi-arrow-right</v-icon>
+              </v-btn>
+            </v-form>
+            <div class="text-center mt-6">
+              <div class="text-caption text-medium-emphasis">Protected by secure authentication</div>
+            </div>
+          </v-card>
+        </v-col>
+      </v-row>
+    </v-container>
+  </div>`
+};
+
+
+</script>
+
+<style>
+.login-bg {
+  min-height: 100vh;
+  width: 100%;
+  background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+</style>
